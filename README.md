@@ -34,10 +34,35 @@ fatura vence. O time de cobrança é pequeno e não consegue ligar para todos os
 
 ## 3. Indicadores (KPIs)
 
-- **DSO** (Days Sales Outstanding): prazo médio de recebimento
+- **DSO** (Days Sales Outstanding): prazo médio de recebimento, comparado ao prazo médio concedido
 - **Aging da carteira**: a vencer, vencido 1–30, 31–60, 61–90 e 90+ dias
-- **% de faturas pagas com atraso** e **atraso médio ponderado pelo valor**
-- **Valor em risco (R$)**: soma das faturas em aberto com alta probabilidade de atraso
+- **% de faturas pagas com atraso** e **atraso médio** (simples e ponderado pelo valor)
+- **Valor em risco (R$)**: soma das faturas em aberto com alta probabilidade de atraso *(previsto, com o modelo de ML)*
+
+### Resultados na data de corte (22/09/2026)
+
+Todos os atrasos de títulos em aberto são medidos contra uma **data de corte fixa**, o mesmo conceito da
+data-chave (*key date*) dos relatórios de contas a receber do SAP, como a FBL5N. Assim, o resultado é
+reproduzível: rodar o pipeline em outro dia não muda os números.
+
+| Indicador | Valor |
+|---|---:|
+| Carteira em aberto | R$ 94.812.358,05 |
+| Carteira vencida | R$ 20.072.845,68 (21,17%) |
+| Faturas pagas com atraso | 47,87% (12.147 de 25.373) |
+| Atraso médio simples / ponderado pelo valor | 5,54 / 5,69 dias |
+| DSO (janela de 90 dias) | 79,67 dias |
+| Prazo médio concedido (ponderado pelo valor) | 61,66 dias |
+
+**Principais leituras:**
+
+- **Faturas maiores atrasam mais:** o atraso ponderado pelo valor é maior que o simples.
+- **O aging tem forma de "U":** a maior parte dos vencidos está em 1–30 dias ou já passou de 90 dias
+  (402 de 728 títulos vencidos). A janela de cobrança efetiva é o primeiro mês.
+- **Um único KPI não basta:** o atraso médio dos pagos fica abaixo de 6 dias, mas o DSO está bem acima
+  do prazo concedido. O atraso médio só enxerga quem pagou (viés de sobrevivência); o DSO enxerga a
+  carteira, onde ficam os títulos que nunca foram pagos. A carteira vencida equivale a cerca de
+  **16,9 dias de vendas** parados.
 
 ## 4. Arquitetura
 
@@ -50,7 +75,7 @@ VBRK VBRP BSID BSAD         (Volume)      (bruto)      (limpo)      (KPIs)      
 - **Landing**: volume do Unity Catalog onde os arquivos chegam sem transformação
 - **Bronze**: cópia fiel da origem (tudo como texto, datas `YYYYMMDD`, chaves com zeros à esquerda) com metadados de auditoria
 - **Silver**: tipagem, deduplicação, nomes de negócio, integridade referencial, **quarentena** de registros inválidos e **reconciliação** de contagens
-- **Gold**: fato de títulos com vencimento, pagamento e atraso; KPIs agregados
+- **Gold**: fato de títulos (uma linha por título, com dias de atraso, situação e faixa de aging) e tabela de KPIs (uma linha por data de corte)
 - **ML**: classificação do risco de atraso de faturas em aberto
 
 Tudo fica no catálogo `workspace`, nos schemas `s4lake_bronze`, `s4lake_silver` e `s4lake_gold`.
@@ -90,6 +115,10 @@ O gerador injeta problemas de qualidade **de propósito**, para que a camada Sil
 
 Checagem de consistência de negócio: **BSID + BSAD = VBRK** (toda fatura virou exatamente um título a receber).
 
+Na Gold, as tabelas também se amarram: a soma dos títulos por situação reproduz as contagens da Silver
+(pagos no prazo + pagos com atraso = 25.373; a vencer + vencidos = 3.352), e os valores somados na
+`fato_titulos` batem com a carteira aberta e o total pago da `kpis_gerais`.
+
 ## 7. Principais decisões de arquitetura
 
 | Decisão | Por quê |
@@ -100,6 +129,12 @@ Checagem de consistência de negócio: **BSID + BSAD = VBRK** (toda fatura virou
 | `decimal(15,2)` para valores monetários | Evita os erros de arredondamento do `double`; mesmo padrão do SAP |
 | Integridade referencial contra a Silver e left joins | Reaproveita dado já tratado e impede que registros sumam em silêncio |
 | Não recalcular o cabeçalho da ordem de venda | Mantém o valor oficial do SAP; os KPIs financeiros nascem da fatura |
+| Data de corte fixa, e não `current_date()` | Reprodutibilidade; espelha a data-chave dos relatórios de contas a receber do SAP |
+| Dias de atraso com sinal na fato; negativos zerados só no KPI | A fato fica intacta e cada indicador decide como usar o dado |
+| Classificações sem valor padrão (`otherwise`) | Um caso inesperado aparece como nulo, em vez de ganhar um valor inventado |
+| Gold em duas tabelas: detalhe e resumo | Grãos diferentes para perguntas diferentes; o dashboard lê do resumo |
+| Colunas de soma e contagem mantidas na `kpis_gerais` | Qualquer leitor consegue refazer cada KPI |
+| DSO com carteira e faturamento na mesma base (valor bruto) | Dividir valor bruto por líquido inflaria o DSO |
 
 ## 8. Estrutura do repositório
 
@@ -120,6 +155,8 @@ Notebooks do pipeline:
 | `03_silver_vendas` | Separa ordens e itens, tipa valores e envia itens inválidos para a quarentena |
 | `04_silver_faturamento` | Faturas e itens com duas checagens de integridade referencial |
 | `05_silver_contas_receber` | Unifica BSID e BSAD em títulos a receber, calcula o vencimento e valida contra as faturas |
+| `06_gold_fato_titulos` | Calcula dias de atraso contra a data de corte, situação e faixa de aging de cada título |
+| `07_gold_kpis_gerais` | Resume a carteira em uma linha de KPIs: vencidos, atrasos médios, DSO e prazo médio concedido |
 
 ## 9. Como gerar os dados
 
@@ -144,6 +181,9 @@ validar** o modelo no final e nunca deve ser usada como variável de entrada (ev
 - [x] Ingestão Bronze no Databricks
 - [x] Camada Silver com regras de qualidade e reconciliação
 - [ ] Camada Gold e KPIs
+  - [x] Fato de títulos com atraso, situação e aging
+  - [x] KPIs gerais com DSO
+  - [ ] Aging em R$ e recortes por ramo, UF e condição de pagamento
 - [ ] Modelo de risco de atraso (MLflow)
 - [ ] Dashboard e espaço Genie
 - [ ] Exploração do SAP Databricks no basic trial do SAP Business Data Cloud
