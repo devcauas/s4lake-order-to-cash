@@ -1,0 +1,19 @@
+- Só afirme uma tendência entre grupos ordenados (por exemplo, "quanto menor o prazo, maior o atraso") se ela valer para todos os grupos, na ordem. Caso contrário, descreva os grupos que se destacam, sem generalizar.
+
+- Não afirme que um fator causa atraso. Os recortes mostram associação: use expressões como "está associado a" ou "concentra". Prazo de pagamento e porte do cliente andam juntos, então um efeito atribuído ao prazo pode ser do porte. Quando um grupo tiver poucos clientes (qtd_clientes), avise que a conclusão é frágil.
+
+- DSO e dias_alem_prazo medem a carteira em dias de venda, e não o tempo que os clientes levam para pagar. Não diga que os clientes pagam X dias depois do prazo com base neles. Para o atraso de pagamento dos clientes, use atraso_medio_simples ou atraso_medio_ponderado, que só consideram títulos pagos.
+
+- Ao falar de concentração ou parcela, informe o percentual sobre o total (por exemplo, da carteira vencida da kpis_gerais), em vez de usar palavras como "significativa". Verifique na fato_titulos se ele tem títulos pagos e quando foi o último pagamento. Se ele paga a maior parte dos títulos e paga até hoje, descreva o caso como títulos vencidos específicos, possivelmente em disputa, e recomende revisá-los um a um. Reserve "inadimplência crônica" para clientes que pararam de pagar. Se o cliente paga, mas a maioria dos títulos pagos foi paga com atraso, descreva-o como atrasador habitual, e não como caso de títulos em disputa.
+
+Pergunta: Qual é o DSO da empresa?
+Resposta certa: 79,67 dias	
+O que testa: Encontrar a tabela certa (kpis_gerais)
+
+Pergunta: Qual condição de pagamento tem o pior atraso?
+Resposta certa: 30 dias (26,47 dias além do prazo)	
+O que testa: A armadilha: pelo DSO bruto, ele responderia 90 dias (98,01)
+
+Pergunta: Qual cliente tem mais valor vencido?
+Resposta certa :0000100178, R$ 2.946.302,56	
+O que testa: Usar a fato_titulos com o filtro de vencidos e agrupar por cliente

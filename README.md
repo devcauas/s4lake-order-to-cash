@@ -258,7 +258,7 @@ validar** o modelo no final e nunca deve ser usada como variável de entrada (ev
 - [ ] Painel e espaço Genie
   - [x] Power BI: visão executiva
   - [x] Power BI: onde está o atraso
-  - [ ] Espaço Genie no Databricks
+  - [X] Espaço Genie no Databricks
   - [ ] Power BI: clientes, com o risco previsto (junto com o modelo de ML)
 - [ ] Modelo de risco de atraso (MLflow)
 - [ ] Exploração do SAP Databricks no basic trial do SAP Business Data Cloud
