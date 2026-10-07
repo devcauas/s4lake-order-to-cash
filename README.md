@@ -28,7 +28,7 @@ fatura vence. O time de cobrança é pequeno e não consegue ligar para todos os
 | Área | Pergunta | Decisão apoiada | Onde é respondida |
 |---|---|---|---|
 | Diretoria financeira | Quanto tempo levamos, em média, para transformar venda em caixa (DSO)? Está piorando? | Planejamento de capital de giro | `kpis_gerais` · Power BI, página 1 |
-| Crédito e Cobrança | Quais faturas **ainda não vencidas** têm maior risco de atraso? | Priorizar a cobrança preventiva | Modelo de ML *(previsto)* |
+| Crédito e Cobrança | Quais faturas **ainda não vencidas** têm maior risco de atraso? | Priorizar a cobrança preventiva | Modelo de ML *(em andamento: baseline treinado)* |
 | Crédito e Cobrança | Quais clientes mudaram de comportamento recentemente? | Revisar limite e condição de pagamento | Modelo de ML *(previsto)* |
 | Comercial | Algum ramo, região ou condição de pagamento concentra o atraso? | Política comercial e de prazos | Recortes da Gold · Power BI, página 2 |
 
@@ -99,8 +99,8 @@ VBRK VBRP BSID BSAD         (Volume)      (bruto)      (limpo)      (KPIs)      
 - **Bronze**: cópia fiel da origem (tudo como texto, datas `YYYYMMDD`, chaves com zeros à esquerda) com metadados de auditoria
 - **Silver**: tipagem, deduplicação, nomes de negócio, integridade referencial, **quarentena** de registros inválidos e **reconciliação** de contagens
 - **Gold**: fato de títulos, KPIs gerais, recortes por ramo, UF e prazo, e aging em R$ (detalhes abaixo)
-- **Consumo**: painel no Power BI Desktop lendo a Gold por um SQL warehouse; espaço Genie *(previsto)*
-- **ML**: classificação do risco de atraso de faturas em aberto *(previsto)*
+- **Consumo**: painel no Power BI Desktop lendo a Gold por um SQL warehouse, e espaço Genie para perguntas em português
+- **ML**: classificação do risco de atraso por título, com scikit-learn e MLflow *(em andamento)*
 
 Tudo fica no catálogo `workspace`, nos schemas `s4lake_bronze`, `s4lake_silver` e `s4lake_gold`.
 
@@ -118,12 +118,16 @@ Tudo fica no catálogo `workspace`, nos schemas `s4lake_bronze`, `s4lake_silver`
 Os recortes são calculados pela mesma função que gera a `kpis_gerais`: chamada sem agrupamento, ela
 reproduz exatamente os 12 indicadores gerais, o que serve de teste para os recortes.
 
+Todas as tabelas e colunas da Gold têm descrições (*comments*) no Unity Catalog, com grão, unidade, fórmula
+e forma de interpretação. Elas são aplicadas pelos próprios notebooks a cada execução, ficam versionadas no Git
+e são a principal fonte de contexto do Genie.
+
 ### O processo Order-to-Cash nas tabelas SAP
 
 O cliente é cadastrado (**KNA1/KNB1**), faz um pedido (**VBAK/VBAP**), recebe a fatura (**VBRK/VBRP**),
 e essa fatura vira um título em aberto (**BSID**) até ser paga (**BSAD**).
 
-## 5. Painel no Power BI
+## 5. Painel no Power BI e espaço Genie
 
 A pasta `dashboards/` contém o painel em Power BI Desktop, em **modo Import**: os dados (sintéticos)
 vão dentro do `.pbix`, então qualquer pessoa consegue abri-lo no Power BI Desktop, sem acesso ao Databricks.
@@ -138,13 +142,64 @@ As credenciais de conexão não ficam salvas no arquivo.
 Todas as regras de negócio ficam na Gold; o Power BI apenas exibe. O painel foi feito no Power BI Desktop;
 a publicação no Power BI Service ficaria para um ambiente corporativo.
 
-## 6. Stack
+### Espaço Genie
 
-Python (pandas, numpy) · Databricks Free Edition · PySpark · Spark SQL · Delta Lake · Unity Catalog ·
-Databricks SQL warehouse · Power BI Desktop · Git + GitHub (Databricks Git folders) ·
-*previstos:* MLflow, Genie, SAP HANA Cloud, GitHub Actions + Databricks Asset Bundles
+O espaço Genie responde perguntas em português sobre as seis tabelas da Gold, usando o SQL warehouse.
+Ele foi testado com perguntas de resposta conhecida (DSO, pior condição de pagamento, cliente com mais valor vencido):
 
-## 7. Qualidade de dados e reconciliação
+- **Só com as descrições das colunas**, os números já vieram certos, inclusive na pergunta-armadilha sobre prazos,
+  em que o DSO bruto apontaria a condição errada.
+- **A interpretação precisou de instruções**: sem elas, o Genie inventava tendências, afirmava causas a partir de
+  associações e chamava de inadimplente crônico um cliente que continua pagando. Cada erro virou uma instrução geral,
+  sem números fixos, para continuar válida em outras datas de corte.
+- **Erros de leitura e aritmética persistem** em parte das respostas. Por isso, o Power BI é a fonte oficial dos números,
+  e o Genie é usado para exploração, com conferência.
+
+Confira as instruções usadas no Genie na pasta dashboards do projeto.
+
+## 6. Modelo de risco de atraso *(em andamento)*
+
+**Objetivo:** ordenar os títulos ainda não vencidos por risco, para a Crédito e Cobrança priorizar as ligações.
+
+**Alvo:** um título é positivo se for pago com **mais de 30 dias** de atraso ou continuar em aberto depois disso.
+O corte de 30 dias vem do aging em "U": quem passa do primeiro mês quase não paga mais.
+
+**Base de treino sem desfecho inventado:** só entram títulos que venceram há mais de 30 dias na data de corte,
+independentemente do status. Filtrar pelo status deixaria na base recente só os bons pagadores (viés de sobrevivência).
+Dos 28.725 títulos, 24.681 têm desfecho conhecido; os 4.044 restantes serão pontuados pelo modelo.
+
+**Separação temporal:** treino com faturas emitidas até 31/12/2025 e teste com as de 2026, simulando um modelo
+treinado no fim de 2025 e usado durante 2026.
+
+| Conjunto | Títulos | Positivos | Taxa |
+|---|---:|---:|---:|
+| Treino | 18.012 | 1.144 | 6,35% |
+| Teste | 6.669 | 494 | 7,41% |
+
+**Baseline:** regressão logística (scikit-learn), com features conhecidas na emissão da fatura: valor, prazo,
+mês do vencimento, ramo e UF. Valor padronizado; demais como categorias. Sem `class_weight`, para manter as
+probabilidades calibradas (média prevista de 6,36% contra 6,35% reais).
+
+| Métrica (teste) | Baseline | Acaso |
+|---|---:|---:|
+| Captura no top 10% | 20,6% | 10% |
+| PR-AUC | 0,120 | 0,074 |
+| ROC-AUC | 0,587 | 0,500 |
+
+Ligando para os 10% de títulos de maior risco, a cobrança alcançaria cerca de 102 dos 494 atrasos graves de 2026,
+o dobro de uma escolha ao acaso. A PR-AUC é a métrica principal, por ser sensível ao topo da lista com uma classe rara.
+Os experimentos ficam registrados no MLflow.
+
+**Próximos passos:** features de histórico do cliente calculadas só com o que se sabia na data de cada fatura,
+comparação com uma regra simples de negócio, validação com o gabarito e pontuação dos títulos em aberto.
+
+## 7. Stack
+
+Python (pandas, numpy, scikit-learn) · Databricks Free Edition · PySpark · Spark SQL · Delta Lake · Unity Catalog ·
+Databricks SQL warehouse · Genie · MLflow · Power BI Desktop · Git + GitHub (Databricks Git folders) ·
+*previstos:* SAP HANA Cloud, GitHub Actions + Databricks Asset Bundles
+
+## 8. Qualidade de dados e reconciliação
 
 O gerador injeta problemas de qualidade **de propósito**, para que a camada Silver precise tratá-los:
 
@@ -177,7 +232,7 @@ Na Gold, as tabelas também se amarram:
 - a junção dos títulos com os clientes mantém as 28.725 linhas, sem nenhum título sem ramo ou UF;
 - 790 dos 800 clientes têm títulos; os 10 restantes estão cadastrados, mas nunca foram faturados.
 
-## 8. Principais decisões de arquitetura
+## 9. Principais decisões de arquitetura
 
 | Decisão | Por quê |
 |---|---|
@@ -200,8 +255,16 @@ Na Gold, as tabelas também se amarram:
 | Descrição do ramo na dimensão de clientes (Silver) | É atributo do cliente; Gold, Power BI e Genie herdam o nome legível |
 | Regras de negócio na Gold, e não no Power BI | Cada regra existe em um só lugar; o painel apenas exibe |
 | Power BI em modo Import | Economiza a cota da Free Edition e permite versionar o `.pbix` com os dados |
+| Descrições das tabelas aplicadas pelos notebooks | Regravar uma tabela apaga comentários feitos à mão; como código, ficam versionados e são reaplicados |
+| Genie com instruções gerais, sem números fixos | Os números mudam a cada data de corte; as regras de interpretação, não |
+| Alvo com corte de 30 dias e títulos não pagos incluídos | O corte segue o aging; ignorar os não pagos esconderia os casos mais graves |
+| Base de treino definida pelo vencimento, nunca pelo status | Filtrar pelo status cria viés de sobrevivência nos períodos recentes |
+| Separação temporal entre treino e teste | Um sorteio deixaria o modelo aprender com o futuro |
+| Prazo e mês como categorias | A relação com o atraso não é linear (dezembro e janeiro, D030 pior que D028) |
+| Regressão logística sem pesos de classe | Os pesos quase não mudam a ordem da lista e distorceriam as probabilidades usadas no valor em risco |
+| PR-AUC como métrica principal e captura no top 10% para o negócio | A acurácia não serve com 6,6% de positivos; a captura traduz o modelo em ligações |
 
-## 9. Estrutura do repositório
+## 10. Estrutura do repositório
 
 ```
 data_generator/   Gerador de dados sintéticos no modelo SAP
@@ -224,7 +287,13 @@ Notebooks do pipeline:
 | `07_gold_kpis_gerais` | Resume a carteira em uma linha de KPIs: vencidos, atrasos médios, DSO, prazo médio e dias além do prazo |
 | `08_gold_recortes` | Junta os títulos aos clientes e calcula os KPIs por ramo, UF e prazo, e o aging em R$ |
 
-## 10. Como gerar os dados
+Notebooks de ML (pasta `ml/`):
+
+| Notebook | O que faz |
+|---|---|
+| `09_ml_base_treino` | Define o alvo, monta a base sem desfecho inventado, separa treino e teste no tempo, treina o baseline e registra no MLflow |
+
+## 11. Como gerar os dados
 
 ```bash
 pip install -r requirements.txt
@@ -245,7 +314,7 @@ validar** o modelo no final e nunca deve ser usada como variável de entrada (ev
 - A condição de pagamento (prazo em dias) é extraída do próprio código (`D030` → 30); num SAP real, viria da tabela **T052**.
 - A descrição do ramo de atividade é mapeada no notebook; num SAP real, viria da tabela de textos **T016T**.
 
-## 11. Roadmap
+## 12. Roadmap
 
 - [x] Definição do problema de negócio
 - [x] Gerador de dados SAP (SD + FI-AR)
@@ -258,9 +327,14 @@ validar** o modelo no final e nunca deve ser usada como variável de entrada (ev
 - [ ] Painel e espaço Genie
   - [x] Power BI: visão executiva
   - [x] Power BI: onde está o atraso
-  - [X] Espaço Genie no Databricks
+  - [x] Espaço Genie no Databricks
   - [ ] Power BI: clientes, com o risco previsto (junto com o modelo de ML)
 - [ ] Modelo de risco de atraso (MLflow)
+  - [x] Alvo, base de treino e separação temporal
+  - [x] Baseline com regressão logística
+  - [ ] Features de histórico do cliente
+  - [ ] Comparação com uma regra simples e validação com o gabarito
+  - [ ] Pontuação dos títulos em aberto na Gold
 - [ ] Exploração do SAP Databricks no basic trial do SAP Business Data Cloud
 - [ ] Carga no SAP HANA Cloud
 - [ ] CI/CD com GitHub Actions + Databricks Asset Bundles
