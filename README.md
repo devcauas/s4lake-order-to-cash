@@ -28,8 +28,8 @@ fatura vence. O time de cobrança é pequeno e não consegue ligar para todos os
 | Área | Pergunta | Decisão apoiada | Onde é respondida |
 |---|---|---|---|
 | Diretoria financeira | Quanto tempo levamos, em média, para transformar venda em caixa (DSO)? Está piorando? | Planejamento de capital de giro | `kpis_gerais` · Power BI, página 1 |
-| Crédito e Cobrança | Quais faturas **ainda não vencidas** têm maior risco de atraso? | Priorizar a cobrança preventiva | Modelo de ML *(em andamento: baseline treinado)* |
-| Crédito e Cobrança | Quais clientes mudaram de comportamento recentemente? | Revisar limite e condição de pagamento | Modelo de ML *(previsto)* |
+| Crédito e Cobrança | Quais faturas **ainda não vencidas** têm maior risco de atraso? | Priorizar a cobrança preventiva | Modelo de ML · `risco_titulos` · Power BI, página 3 |
+| Crédito e Cobrança | Quais clientes mudaram de comportamento recentemente? | Revisar limite e condição de pagamento | *Previsto: monitoramento do risco ao longo do tempo* |
 | Comercial | Algum ramo, região ou condição de pagamento concentra o atraso? | Política comercial e de prazos | Recortes da Gold · Power BI, página 2 |
 
 ## 3. Indicadores (KPIs)
@@ -38,7 +38,7 @@ fatura vence. O time de cobrança é pequeno e não consegue ligar para todos os
 - **Dias além do prazo**: DSO menos o prazo médio concedido; permite comparar grupos com prazos diferentes
 - **Aging da carteira**: a vencer, vencido 1–30, 31–60, 61–90 e 90+ dias, em quantidade e em R$
 - **% de faturas pagas com atraso** e **atraso médio** (simples e ponderado pelo valor)
-- **Valor em risco (R$)**: soma das faturas em aberto com alta probabilidade de atraso *(previsto, com o modelo de ML)*
+- **Valor em risco (R$)**: perda esperada dos títulos em aberto, calculada como valor × probabilidade de atraso grave prevista pelo modelo
 
 ### Resultados na data de corte (22/09/2026)
 
@@ -55,6 +55,7 @@ reproduzível: rodar o pipeline em outro dia não muda os números.
 | DSO (janela de 90 dias) | 79,67 dias |
 | Prazo médio concedido (ponderado pelo valor) | 61,66 dias |
 | Dias além do prazo (DSO − prazo médio concedido) | 18,01 dias |
+| Valor em risco (títulos em aberto até 30 dias após o vencimento) | R$ 9.140.483,95 |
 
 **Principais leituras:**
 
@@ -82,8 +83,10 @@ Por isso, os recortes são comparados pelos **dias além do prazo**:
 - **UF:** Pernambuco se destaca com 46,80 dias além do prazo, mais que o dobro do segundo colocado. O Ceará,
   que parecia ruim pelo DSO bruto (80,70), é um dos melhores estados (10,13).
 - **Concentração:** em Pernambuco, um único cliente responde por **81% da carteira vencida do estado**.
-  Ele continua ativo e pagando a maioria das faturas, mas acumulou títulos específicos sem pagamento ao longo
-  de quase dois anos. A ação indicada é revisar esses títulos, e não mudar a política comercial do estado.
+  Ele continua comprando e pagando, mas paga **100% das faturas com atraso** e deixou cerca de 1 em cada 4
+  títulos sem pagamento. É um mau pagador habitual, e não um caso de títulos em disputa: a validação do modelo
+  com o gabarito confirmou que ele pertence ao perfil crítico. A ação indicada é tratá-lo individualmente
+  (limite e condição de pagamento), e não mudar a política comercial do estado.
 - **Grupos pequenos pedem cautela:** cada recorte traz a quantidade de clientes, porque segmentos com poucos
   clientes (CE com 29, BA com 39) variam ao acaso.
 
@@ -92,15 +95,18 @@ Por isso, os recortes são comparados pelos **dias além do prazo**:
 ```
 SAP (tabelas SD + FI-AR)                  Databricks (Unity Catalog)
 KNA1 KNB1 VBAK VBAP    ──▶  Landing  ──▶  Bronze  ──▶  Silver  ──▶  Gold  ──▶  Power BI + Genie
-VBRK VBRP BSID BSAD         (Volume)      (bruto)      (limpo)      (KPIs)      Modelo de ML (MLflow)
+VBRK VBRP BSID BSAD         (Volume)      (bruto)      (limpo)      (KPIs)  ▲
+                                                                    │       │
+                                                                    ▼       │
+                                                          Modelo de ML (MLflow + Unity Catalog)
 ```
 
 - **Landing**: volume do Unity Catalog onde os arquivos chegam sem transformação
 - **Bronze**: cópia fiel da origem (tudo como texto, datas `YYYYMMDD`, chaves com zeros à esquerda) com metadados de auditoria
 - **Silver**: tipagem, deduplicação, nomes de negócio, integridade referencial, **quarentena** de registros inválidos e **reconciliação** de contagens
-- **Gold**: fato de títulos, KPIs gerais, recortes por ramo, UF e prazo, e aging em R$ (detalhes abaixo)
+- **Gold**: fato de títulos, KPIs gerais, recortes por ramo, UF e prazo, aging em R$, features do modelo e risco previsto (detalhes abaixo)
+- **ML**: classificação do risco de atraso por título com scikit-learn, experimentos no MLflow e modelo registrado no Unity Catalog; a pontuação volta para a Gold
 - **Consumo**: painel no Power BI Desktop lendo a Gold por um SQL warehouse, e espaço Genie para perguntas em português
-- **ML**: classificação do risco de atraso por título, com scikit-learn e MLflow *(em andamento)*
 
 Tudo fica no catálogo `workspace`, nos schemas `s4lake_bronze`, `s4lake_silver` e `s4lake_gold`.
 
@@ -114,6 +120,10 @@ Tudo fica no catálogo `workspace`, nos schemas `s4lake_bronze`, `s4lake_silver`
 | `kpis_por_uf` | uma UF | 10 |
 | `kpis_por_prazo` | um prazo de pagamento | 5 |
 | `aging_carteira` | uma faixa de aging da carteira em aberto | 5 |
+| `features_historico_cliente` | um título, com o histórico do cliente conhecido na emissão dele | 28.725 |
+| `risco_titulos` | um título em aberto sem desfecho conhecido, com a probabilidade de atraso e o valor em risco | 2.868 |
+
+O modelo campeão fica registrado no mesmo schema, como `workspace.s4lake_gold.modelo_risco_atraso`.
 
 Os recortes são calculados pela mesma função que gera a `kpis_gerais`: chamada sem agrupamento, ela
 reproduz exatamente os 12 indicadores gerais, o que serve de teste para os recortes.
@@ -137,36 +147,42 @@ As credenciais de conexão não ficam salvas no arquivo.
 |---|---|---|
 | Visão executiva | Diretoria financeira | Carteira em aberto e vencida, DSO com o prazo concedido e os dias além do prazo, % pago com atraso e aging em R$ |
 | Onde está o atraso | Área Comercial | Dias além do prazo por ramo, UF e prazo, com a média da empresa como referência e destaque para os grupos acima dela |
-| Clientes | Crédito e Cobrança | *Prevista para a etapa de ML, com o risco previsto por título* |
+| Cobrança preventiva | Crédito e Cobrança | Valor em risco, títulos com risco acima de 50%, clientes ordenados pelo valor em risco e, ao clicar num cliente, os títulos dele com a probabilidade prevista |
 
 Todas as regras de negócio ficam na Gold; o Power BI apenas exibe. O painel foi feito no Power BI Desktop;
 a publicação no Power BI Service ficaria para um ambiente corporativo.
 
 ### Espaço Genie
 
-O espaço Genie responde perguntas em português sobre as seis tabelas da Gold, usando o SQL warehouse.
-Ele foi testado com perguntas de resposta conhecida (DSO, pior condição de pagamento, cliente com mais valor vencido):
+O espaço Genie responde perguntas em português sobre as sete tabelas da Gold, usando o SQL warehouse.
+Ele foi testado em duas rodadas com perguntas de resposta conhecida (DSO, pior condição de pagamento,
+cliente com mais valor vencido, valor em risco total, títulos de alto risco e maiores clientes em risco):
 
-- **Só com as descrições das colunas**, os números já vieram certos, inclusive na pergunta-armadilha sobre prazos,
-  em que o DSO bruto apontaria a condição errada.
+- **Só com as descrições das colunas**, os números já vieram certos em todas as perguntas, inclusive na
+  pergunta-armadilha sobre prazos, em que o DSO bruto apontaria a condição errada.
 - **A interpretação precisou de instruções**: sem elas, o Genie inventava tendências, afirmava causas a partir de
-  associações e chamava de inadimplente crônico um cliente que continua pagando. Cada erro virou uma instrução geral,
+  associações e rotulava clientes sem verificar o histórico. Cada erro virou uma instrução geral,
   sem números fixos, para continuar válida em outras datas de corte.
-- **Erros de leitura e aritmética persistem** em parte das respostas. Por isso, o Power BI é a fonte oficial dos números,
+- **Deslizes de narrativa persistem** em parte das respostas. Por isso, o Power BI é a fonte oficial dos números,
   e o Genie é usado para exploração, com conferência.
 
-Confira as instruções usadas no Genie na pasta dashboards do projeto.
+A configuração, as sete instruções e as perguntas de teste com as respostas esperadas estão em
+[`dashboards/genie_espaco.md`](dashboards/genie_espaco.md).
 
-## 6. Modelo de risco de atraso *(em andamento)*
+## 6. Modelo de risco de atraso
 
-**Objetivo:** ordenar os títulos ainda não vencidos por risco, para a Crédito e Cobrança priorizar as ligações.
+**Objetivo:** ordenar os títulos em aberto por risco, para a Crédito e Cobrança priorizar as ligações antes
+que o atraso fique grave.
+
+### Alvo e base de treino
 
 **Alvo:** um título é positivo se for pago com **mais de 30 dias** de atraso ou continuar em aberto depois disso.
 O corte de 30 dias vem do aging em "U": quem passa do primeiro mês quase não paga mais.
 
 **Base de treino sem desfecho inventado:** só entram títulos que venceram há mais de 30 dias na data de corte,
 independentemente do status. Filtrar pelo status deixaria na base recente só os bons pagadores (viés de sobrevivência).
-Dos 28.725 títulos, 24.681 têm desfecho conhecido; os 4.044 restantes serão pontuados pelo modelo.
+Dos 28.725 títulos, 24.681 entram no treino. Dos 4.044 restantes, 2.868 continuam em aberto e são pontuados
+pelo modelo; os outros 1.176 já foram pagos e não precisam de cobrança.
 
 **Separação temporal:** treino com faturas emitidas até 31/12/2025 e teste com as de 2026, simulando um modelo
 treinado no fim de 2025 e usado durante 2026.
@@ -176,28 +192,79 @@ treinado no fim de 2025 e usado durante 2026.
 | Treino | 18.012 | 1.144 | 6,35% |
 | Teste | 6.669 | 494 | 7,41% |
 
-**Baseline:** regressão logística (scikit-learn), com features conhecidas na emissão da fatura: valor, prazo,
-mês do vencimento, ramo e UF. Valor padronizado; demais como categorias. Sem `class_weight`, para manter as
-probabilidades calibradas (média prevista de 6,36% contra 6,35% reais).
+### Features
 
-| Métrica (teste) | Baseline | Acaso |
-|---|---:|---:|
-| Captura no top 10% | 20,6% | 10% |
-| PR-AUC | 0,120 | 0,074 |
-| ROC-AUC | 0,587 | 0,500 |
+- **Do título**, conhecidas na emissão: valor (padronizado), prazo, mês do vencimento, ramo e UF (categorias).
+- **Do histórico do cliente, calculadas *point-in-time***: para cada fatura, o atraso médio dos outros títulos
+  do mesmo cliente que **já se conheciam na data de emissão dela**. Títulos pagos antes da emissão entram com o
+  atraso final; títulos vencidos e ainda em aberto na emissão entram com o atraso contado até a emissão.
+  Nenhum dado posterior à emissão é usado, o que evita vazamento.
+- **Sem histórico**: 3.573 títulos da base (quase todos dos primeiros meses de dados) não têm nenhum título
+  anterior pago ou vencido. Eles recebem a mediana do treino, aprendida dentro do pipeline, e uma flag `sem_historico`.
 
-Ligando para os 10% de títulos de maior risco, a cobrança alcançaria cerca de 102 dos 494 atrasos graves de 2026,
-o dobro de uma escolha ao acaso. A PR-AUC é a métrica principal, por ser sensível ao topo da lista com uma classe rara.
-Os experimentos ficam registrados no MLflow.
+Conferência da feature: na última fatura do cliente com mais valor vencido, ela conta 249 títulos de histórico,
+exatamente os 170 pagos mais os 79 vencidos que a `fato_titulos` mostra para ele na data de corte.
 
-**Próximos passos:** features de histórico do cliente calculadas só com o que se sabia na data de cada fatura,
-comparação com uma regra simples de negócio, validação com o gabarito e pontuação dos títulos em aberto.
+### Comparação: baseline, regra simples e modelo
+
+Um modelo só se justifica se superar a melhor regra simples de negócio. Por isso, três abordagens foram
+avaliadas no mesmo teste de 2026 e registradas no MLflow:
+
+| Abordagem (teste) | PR-AUC | Captura no top 10% | ROC-AUC |
+|---|---:|---:|---:|
+| Acaso | 0,074 | 10% | 0,500 |
+| Baseline: regressão logística só com features do título | 0,120 | 20,6% | 0,587 |
+| Regra simples: ordenar pelo atraso médio histórico do cliente | 0,565 | 62,1% | 0,928 |
+| **Modelo: regressão logística com o histórico do cliente** | **0,566** | **63,4%** | 0,926 |
+
+**Leituras:**
+
+- **O histórico do cliente é o que importa.** Ligando para os 10% de títulos de maior risco, a cobrança
+  alcançaria cerca de 313 dos 494 atrasos graves de 2026, contra 102 do baseline e 49 ao acaso.
+- **O modelo empata com a regra simples na ordenação.** Ele foi mantido por outro motivo: entrega uma
+  **probabilidade**, e não só uma ordem, que é o que permite calcular o valor em risco em reais.
+  Sem `class_weight`, a probabilidade média prevista no treino (6,36%) coincide com a taxa real (6,35%).
+
+### Validação com o gabarito
+
+O gerador guarda o perfil oculto de pagamento de cada cliente, que **nunca** entrou como feature.
+Comparando o risco previsto com esse perfil, no teste:
+
+| Perfil oculto | Títulos | Probabilidade média prevista | Taxa real de atraso grave |
+|---|---:|---:|---:|
+| Pontual | 3.693 | 2,1% | 0,1% |
+| Tolerável | 1.972 | 4,6% | 3,8% |
+| Atrasador | 753 | 29,6% | 29,2% |
+| Crítico | 251 | 90,6% | 78,5% |
+
+O risco previsto sobe na ordem certa e acompanha a taxa real: o modelo redescobriu o perfil de cada cliente
+sem nunca tê-lo visto. O cliente que concentra o vencido de Pernambuco aparece como **crítico** no gabarito.
+
+**Limitação conhecida:** nas pontas, o modelo exagera (pontual e crítico acima da taxa real). No teste, ele
+previu cerca de 619 atrasos graves, contra 494 reais, cerca de 25% a mais. A causa provável é a parte do
+histórico medida até a emissão: em clientes com títulos parados há muito tempo, ela cresce com o tempo e
+ultrapassa os valores vistos no treino. **A ordem da lista é confiável; o valor em risco deve ser lido como um teto.**
+
+### Pontuação e resultados
+
+O modelo campeão está registrado no Unity Catalog como `modelo_risco_atraso`, com o apelido `campeao`. A
+pontuação carrega sempre o modelo com esse apelido, então trocar de modelo não exige mudar código.
+
+Na data de corte, foram pontuados os **2.868 títulos em aberto** que ainda não completaram 30 dias após o
+vencimento (R$ 81,53 mi, igual à carteira a vencer mais a faixa 1–30 do aging):
+
+- **Valor em risco: R$ 9,14 mi**, cerca de 11% do valor pontuado.
+- **200 títulos** têm probabilidade acima de 50% (R$ 6,29 mi) e concentram **57%** do valor em risco.
+- **Cinco clientes** concentram **39%** do valor em risco; só o maior deles responde por 17%.
+- O risco é muito concentrado: metade dos títulos tem probabilidade abaixo de 2,1%.
+
+Para a cobrança, isso significa que uma lista curta resolve a maior parte do problema.
 
 ## 7. Stack
 
 Python (pandas, numpy, scikit-learn) · Databricks Free Edition · PySpark · Spark SQL · Delta Lake · Unity Catalog ·
-Databricks SQL warehouse · Genie · MLflow · Power BI Desktop · Git + GitHub (Databricks Git folders) ·
-*previstos:* SAP HANA Cloud, GitHub Actions + Databricks Asset Bundles
+Databricks SQL warehouse · Genie · MLflow (experimentos e registro de modelos no Unity Catalog) · Power BI Desktop ·
+Git + GitHub (Databricks Git folders) · *previstos:* SAP HANA Cloud, GitHub Actions + Databricks Asset Bundles
 
 ## 8. Qualidade de dados e reconciliação
 
@@ -230,7 +297,10 @@ Na Gold, as tabelas também se amarram:
 - os valores somados na `fato_titulos` batem com a carteira aberta e o total pago da `kpis_gerais`;
 - em cada recorte, as colunas de soma e contagem reproduzem a `kpis_gerais` (razões não são somadas entre grupos);
 - a junção dos títulos com os clientes mantém as 28.725 linhas, sem nenhum título sem ramo ou UF;
-- 790 dos 800 clientes têm títulos; os 10 restantes estão cadastrados, mas nunca foram faturados.
+- 790 dos 800 clientes têm títulos; os 10 restantes estão cadastrados, mas nunca foram faturados;
+- a `features_historico_cliente` tem uma linha por título (28.725) e os nulos da feature na base do modelo
+  (3.573) são exatamente os títulos sem histórico do treino (3.248) e do teste (325);
+- o valor pontuado na `risco_titulos` (R$ 81.529.575,85) é igual à carteira a vencer mais a faixa 1–30 do aging.
 
 ## 9. Principais decisões de arquitetura
 
@@ -263,6 +333,15 @@ Na Gold, as tabelas também se amarram:
 | Prazo e mês como categorias | A relação com o atraso não é linear (dezembro e janeiro, D030 pior que D028) |
 | Regressão logística sem pesos de classe | Os pesos quase não mudam a ordem da lista e distorceriam as probabilidades usadas no valor em risco |
 | PR-AUC como métrica principal e captura no top 10% para o negócio | A acurácia não serve com 6,6% de positivos; a captura traduz o modelo em ligações |
+| Features de histórico calculadas *point-in-time*, com a condição de data dentro do join | Cada fatura só enxerga o que se sabia na emissão; a condição no join mantém os títulos sem histórico |
+| Títulos abertos no histórico entram com o atraso até a emissão | Ignorá-los descreveria como bom pagador um cliente que está devendo agora |
+| Features em tabela própria na Gold | O treino e a pontuação leem a mesma regra, sem cópias que possam divergir |
+| Nulos tratados com a mediana do treino dentro do pipeline, mais uma flag | Sem vazamento do teste e sem esconder do modelo que o título não tinha histórico |
+| Comparar o modelo com uma regra simples | Um modelo só se justifica se superar a melhor alternativa sem modelo |
+| Manter o modelo mesmo empatando com a regra na ordenação | Só o modelo entrega uma probabilidade calibrada, necessária para o valor em risco |
+| Gabarito usado só na validação | Usá-lo como feature seria vazamento; como validação, mostra se o modelo aprendeu o padrão certo |
+| Modelo registrado no Unity Catalog com o apelido `campeao` | A pontuação não depende do número da versão; trocar de modelo é mover o apelido |
+| Pontuar só os títulos em aberto sem desfecho | Títulos já pagos não precisam de cobrança; os vencidos há mais de 30 dias já são atraso grave |
 
 ## 10. Estrutura do repositório
 
@@ -270,7 +349,7 @@ Na Gold, as tabelas também se amarram:
 data_generator/   Gerador de dados sintéticos no modelo SAP
 pipelines/        Notebooks Bronze → Silver → Gold
 ml/               Modelo de previsão de atraso
-dashboards/       Painel do Power BI (.pbix) e espaço Genie
+dashboards/       Painel do Power BI (.pbix) e configuração do espaço Genie
 docs/             Dicionário de dados e decisões de arquitetura
 ```
 
@@ -291,7 +370,9 @@ Notebooks de ML (pasta `ml/`):
 
 | Notebook | O que faz |
 |---|---|
-| `09_ml_base_treino` | Define o alvo, monta a base sem desfecho inventado, separa treino e teste no tempo, treina o baseline e registra no MLflow |
+| `09_ml_base_treino` | Define o alvo, monta a base, separa treino e teste no tempo, compara baseline, regra simples e modelo com histórico no MLflow, valida com o gabarito e registra o modelo campeão |
+| `10_ml_features_historico` | Calcula o atraso médio *point-in-time* do histórico de cada cliente e grava a `features_historico_cliente` |
+| `11_ml_pontuacao` | Carrega o modelo campeão, pontua os títulos em aberto sem desfecho e grava a `risco_titulos` |
 
 ## 11. Como gerar os dados
 
@@ -307,7 +388,7 @@ Ao ler os CSVs, trate todas as colunas-chave como **texto**, senão os zeros à 
 (ex.: `pd.read_csv(..., dtype=str)` ou `inferSchema=false` no Spark).
 
 A pasta `data/_gabarito/` contém o perfil real de pagamento de cada cliente. Ela serve **somente para
-validar** o modelo no final e nunca deve ser usada como variável de entrada (evita *data leakage*).
+validar** o modelo e nunca é usada como variável de entrada (evita *data leakage*).
 
 ### Simplificações conscientes
 
@@ -324,17 +405,18 @@ validar** o modelo no final e nunca deve ser usada como variável de entrada (ev
   - [x] Fato de títulos com atraso, situação e aging
   - [x] KPIs gerais com DSO e dias além do prazo
   - [x] Aging em R$ e recortes por ramo, UF e condição de pagamento
-- [ ] Painel e espaço Genie
+- [x] Painel e espaço Genie
   - [x] Power BI: visão executiva
   - [x] Power BI: onde está o atraso
-  - [x] Espaço Genie no Databricks
-  - [ ] Power BI: clientes, com o risco previsto (junto com o modelo de ML)
-- [ ] Modelo de risco de atraso (MLflow)
+  - [x] Power BI: cobrança preventiva, com o risco previsto
+  - [x] Espaço Genie no Databricks, com a tabela de risco
+- [x] Modelo de risco de atraso (MLflow)
   - [x] Alvo, base de treino e separação temporal
   - [x] Baseline com regressão logística
-  - [ ] Features de histórico do cliente
-  - [ ] Comparação com uma regra simples e validação com o gabarito
-  - [ ] Pontuação dos títulos em aberto na Gold
+  - [x] Features de histórico do cliente (*point-in-time*)
+  - [x] Comparação com uma regra simples e validação com o gabarito
+  - [x] Registro do modelo no Unity Catalog e pontuação dos títulos em aberto na Gold
+- [ ] Melhorias do modelo: corrigir a superestimação nas pontas e monitorar mudanças de comportamento dos clientes
 - [ ] Exploração do SAP Databricks no basic trial do SAP Business Data Cloud
 - [ ] Carga no SAP HANA Cloud
 - [ ] CI/CD com GitHub Actions + Databricks Asset Bundles
