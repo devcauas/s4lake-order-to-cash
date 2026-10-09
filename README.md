@@ -3,6 +3,17 @@
 Arquitetura de referência **SAP + Databricks** para análise e previsão de recebíveis, inspirada no
 [SAP Business Data Cloud](https://www.sap.com/products/data-cloud/databricks.html).
 
+**Em resumo:** a partir de dados no modelo SAP (SD + FI-AR), o projeto monta um pipeline Bronze → Silver → Gold
+no Databricks, mede onde está o atraso de recebimento e prevê quais faturas em aberto vão atrasar.
+
+- **DSO 18 dias acima do prazo concedido**, com o atraso concentrado em um ramo, uma UF e poucos clientes.
+- **O modelo encontra 63% dos atrasos graves** ligando para só 10% dos títulos, contra 10% ao acaso.
+- **R$ 9,14 mi em risco** na carteira em aberto, com **5 clientes concentrando 39%** desse valor.
+- **Nenhuma linha some:** toda tabela da Silver reconcilia com a origem (válidos + quarentena = origem).
+
+![Página de cobrança preventiva do painel no Power BI](docs/img/cobranca_preventiva.png)
+*Obs.: Em clientes críticos, a probabilidade chega a valores acima de 99,9%, exibidos como 100,0% no painel, efeito da mesma causa.*
+
 > **Transparência:** o SAP Databricks é um produto corporativo licenciado dentro do SAP Business Data Cloud (BDC).
 > A SAP oferece um [basic trial do BDC](https://www.sap.com/products/data-cloud/trial.html) de 30 dias, em tenant
 > compartilhado com dados pré-configurados e sem persistência entre períodos, o que não permite hospedar um
@@ -27,7 +38,8 @@ fatura vence. O time de cobrança é pequeno e não consegue ligar para todos os
 
 | Área | Pergunta | Decisão apoiada | Onde é respondida |
 |---|---|---|---|
-| Diretoria financeira | Quanto tempo levamos, em média, para transformar venda em caixa (DSO)? Está piorando? | Planejamento de capital de giro | `kpis_gerais` · Power BI, página 1 |
+| Diretoria financeira | Quanto tempo levamos, em média, para transformar venda em caixa (DSO)? | Planejamento de capital de giro | `kpis_gerais` · Power BI, página 1 |
+| Diretoria financeira | O DSO está piorando? | Planejamento de capital de giro | *Previsto: série mensal do DSO* |
 | Crédito e Cobrança | Quais faturas **ainda não vencidas** têm maior risco de atraso? | Priorizar a cobrança preventiva | Modelo de ML · `risco_titulos` · Power BI, página 3 |
 | Crédito e Cobrança | Quais clientes mudaram de comportamento recentemente? | Revisar limite e condição de pagamento | *Previsto: monitoramento do risco ao longo do tempo* |
 | Comercial | Algum ramo, região ou condição de pagamento concentra o atraso? | Política comercial e de prazos | Recortes da Gold · Power BI, página 2 |
@@ -38,7 +50,8 @@ fatura vence. O time de cobrança é pequeno e não consegue ligar para todos os
 - **Dias além do prazo**: DSO menos o prazo médio concedido; permite comparar grupos com prazos diferentes
 - **Aging da carteira**: a vencer, vencido 1–30, 31–60, 61–90 e 90+ dias, em quantidade e em R$
 - **% de faturas pagas com atraso** e **atraso médio** (simples e ponderado pelo valor)
-- **Valor em risco (R$)**: perda esperada dos títulos em aberto, calculada como valor × probabilidade de atraso grave prevista pelo modelo
+- **Valor em risco (R$)**: valor esperado em atraso grave nos títulos em aberto, calculado como valor × probabilidade
+  de atraso grave prevista pelo modelo. Atraso grave não é perda: um título pode atrasar mais de 30 dias e ainda ser pago.
 
 ### Resultados na data de corte (22/09/2026)
 
@@ -92,13 +105,33 @@ Por isso, os recortes são comparados pelos **dias além do prazo**:
 
 ## 4. Arquitetura
 
-```
-SAP (tabelas SD + FI-AR)                  Databricks (Unity Catalog)
-KNA1 KNB1 VBAK VBAP    ──▶  Landing  ──▶  Bronze  ──▶  Silver  ──▶  Gold  ──▶  Power BI + Genie
-VBRK VBRP BSID BSAD         (Volume)      (bruto)      (limpo)      (KPIs)  ▲
-                                                                    │       │
-                                                                    ▼       │
-                                                          Modelo de ML (MLflow + Unity Catalog)
+```mermaid
+flowchart LR
+    subgraph SAP["SAP S/4HANA (dados sintéticos)"]
+        direction TB
+        KNA["KNA1 · KNB1<br/>clientes"]
+        VBA["VBAK · VBAP<br/>ordens de venda"]
+        VBR["VBRK · VBRP<br/>faturas"]
+        BS["BSID · BSAD<br/>títulos a receber"]
+    end
+
+    subgraph DBX["Databricks Free Edition · Unity Catalog"]
+        direction LR
+        LAND["Landing<br/>(Volume)"]
+        BRZ["Bronze<br/>cópia fiel"]
+        SLV["Silver<br/>limpo + quarentena"]
+        GLD["Gold<br/>KPIs · features · risco"]
+        ML["Modelo de ML<br/>MLflow + Unity Catalog"]
+        GEN["Genie"]
+    end
+
+    PBI["Power BI Desktop"]
+
+    SAP --> LAND --> BRZ --> SLV --> GLD
+    GLD -- "features" --> ML
+    ML -- "risco_titulos" --> GLD
+    GLD --> GEN
+    GLD -- "SQL warehouse" --> PBI
 ```
 
 - **Landing**: volume do Unity Catalog onde os arquivos chegam sem transformação
@@ -132,6 +165,8 @@ Todas as tabelas e colunas da Gold têm descrições (*comments*) no Unity Catal
 e forma de interpretação. Elas são aplicadas pelos próprios notebooks a cada execução, ficam versionadas no Git
 e são a principal fonte de contexto do Genie.
 
+![Descrições da tabela risco_titulos no Unity Catalog](docs/img/catalog_descricoes.png)
+
 ### O processo Order-to-Cash nas tabelas SAP
 
 O cliente é cadastrado (**KNA1/KNB1**), faz um pedido (**VBAK/VBAP**), recebe a fatura (**VBRK/VBRP**),
@@ -149,6 +184,19 @@ As credenciais de conexão não ficam salvas no arquivo.
 | Onde está o atraso | Área Comercial | Dias além do prazo por ramo, UF e prazo, com a média da empresa como referência e destaque para os grupos acima dela |
 | Cobrança preventiva | Crédito e Cobrança | Valor em risco, títulos com risco acima de 50%, clientes ordenados pelo valor em risco e, ao clicar num cliente, os títulos dele com a probabilidade prevista |
 
+**Visão executiva**
+
+![Página 1 do painel: visão executiva da carteira](docs/img/painel_visao_executiva.png)
+
+**Onde está o atraso**
+
+![Página 2 do painel: dias além do prazo por ramo, UF e prazo](docs/img/painel_onde_esta_atraso.png)
+
+**Cobrança preventiva**, com o cliente 0000100178 selecionado: os 42 títulos em aberto dele aparecem com
+probabilidade acima de 99%, o que mostra a superestimação nas pontas descrita na seção 6.
+
+![Página 3 do painel: títulos do cliente 0000100178 com a probabilidade prevista](docs/img/painel_cobranca_cliente.png)
+
 Todas as regras de negócio ficam na Gold; o Power BI apenas exibe. O painel foi feito no Power BI Desktop;
 a publicação no Power BI Service ficaria para um ambiente corporativo.
 
@@ -165,6 +213,11 @@ cliente com mais valor vencido, valor em risco total, títulos de alto risco e m
   sem números fixos, para continuar válida em outras datas de corte.
 - **Deslizes de narrativa persistem** em parte das respostas. Por isso, o Power BI é a fonte oficial dos números,
   e o Genie é usado para exploração, com conferência.
+
+![Genie respondendo qual condição de pagamento tem o pior atraso](docs/img/genie_pergunta_armadilha.png)
+
+O Genie aponta a D030 pelos dias além do prazo, e não a D090, que tem o maior DSO bruto: quem recebe 90 dias
+naturalmente demora mais para pagar, mesmo pagando em dia.
 
 A configuração, as sete instruções e as perguntas de teste com as respostas esperadas estão em
 [`dashboards/genie_espaco.md`](dashboards/genie_espaco.md).
@@ -217,6 +270,8 @@ avaliadas no mesmo teste de 2026 e registradas no MLflow:
 | Regra simples: ordenar pelo atraso médio histórico do cliente | 0,565 | 62,1% | 0,928 |
 | **Modelo: regressão logística com o histórico do cliente** | **0,566** | **63,4%** | 0,926 |
 
+![Comparação das três runs no MLflow: baseline, modelo com histórico e regra simples](docs/img/mlflow_comparacao.png)
+
 **Leituras:**
 
 - **O histórico do cliente é o que importa.** Ligando para os 10% de títulos de maior risco, a cobrança
@@ -249,6 +304,8 @@ ultrapassa os valores vistos no treino. **A ordem da lista é confiável; o valo
 
 O modelo campeão está registrado no Unity Catalog como `modelo_risco_atraso`, com o apelido `campeao`. A
 pontuação carrega sempre o modelo com esse apelido, então trocar de modelo não exige mudar código.
+
+![Modelo modelo_risco_atraso registrado no Unity Catalog com o apelido campeao](docs/img/modelo_unity_catalog.png)
 
 Na data de corte, foram pontuados os **2.868 títulos em aberto** que ainda não completaram 30 dias após o
 vencimento (R$ 81,53 mi, igual à carteira a vencer mais a faixa 1–30 do aging):
@@ -374,7 +431,9 @@ Notebooks de ML (pasta `ml/`):
 | `10_ml_features_historico` | Calcula o atraso médio *point-in-time* do histórico de cada cliente e grava a `features_historico_cliente` |
 | `11_ml_pontuacao` | Carrega o modelo campeão, pontua os títulos em aberto sem desfecho e grava a `risco_titulos` |
 
-## 11. Como gerar os dados
+## 11. Como reproduzir
+
+### 1. Gerar os dados
 
 ```bash
 pip install -r requirements.txt
@@ -389,6 +448,16 @@ Ao ler os CSVs, trate todas as colunas-chave como **texto**, senão os zeros à 
 
 A pasta `data/_gabarito/` contém o perfil real de pagamento de cada cliente. Ela serve **somente para
 validar** o modelo e nunca é usada como variável de entrada (evita *data leakage*).
+
+### 2. Rodar no Databricks
+
+1. Clone este repositório como **Git folder** no workspace do Databricks (Free Edition).
+2. Suba os CSVs de `data/raw` para o volume da Landing, no caminho indicado no início do notebook `01_bronze_ingestao`.
+3. Rode os notebooks do pipeline na ordem, de `01` a `08`.
+4. Rode os notebooks de ML na ordem `10` → `09` → `11`: as features de histórico precisam existir antes do treino,
+   e a pontuação usa o modelo registrado pelo treino.
+5. Para o painel, abra o `.pbix` da pasta `dashboards/` no Power BI Desktop. Para atualizar os dados, conecte-o
+   ao seu SQL warehouse (com um token de acesso pessoal).
 
 ### Simplificações conscientes
 
@@ -405,6 +474,7 @@ validar** o modelo e nunca é usada como variável de entrada (evita *data leaka
   - [x] Fato de títulos com atraso, situação e aging
   - [x] KPIs gerais com DSO e dias além do prazo
   - [x] Aging em R$ e recortes por ramo, UF e condição de pagamento
+  - [ ] Série mensal do DSO, para acompanhar a tendência
 - [x] Painel e espaço Genie
   - [x] Power BI: visão executiva
   - [x] Power BI: onde está o atraso

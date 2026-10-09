@@ -17,13 +17,19 @@ O espaço Genie fica no Databricks e não é versionado pelo Git. Este arquivo g
 
 As instruções são regras gerais, sem números fixos, para continuarem válidas em qualquer data de corte.
 
-1. Só afirmar tendência entre grupos ordenados se ela valer para todos, na ordem; caso contrário, descrever os grupos que se destacam.
-2. Não afirmar causa; usar "está associado a" ou "concentra". Prazo e porte do cliente andam juntos. Avisar quando `qtd_clientes` for pequeno.
-3. DSO e `dias_alem_prazo` medem a carteira em dias de venda, não o tempo que os clientes levam para pagar; para isso, usar os atrasos médios.
-4. Antes de chamar um cliente de inadimplente crônico ou recomendar cobrança urgente, verificar títulos pagos e o último pagamento. Se paga até hoje, descrever como títulos vencidos específicos; se a maioria dos pagos foi com atraso, como atrasador habitual.
-5. Ao falar de concentração, informar o percentual sobre o total, e não palavras como "significativa".
-6. A `risco_titulos` cobre só os títulos em aberto que ainda não completaram 30 dias após o vencimento. Os vencidos há mais de 30 dias não estão nela, porque já são atraso grave e estão na `fato_titulos`. Ao falar de "valor em risco da empresa", deixar claro que ele não inclui a carteira já vencida há mais de 30 dias.
-7. `probabilidade_atraso` é uma estimativa para ordenar a cobrança, não uma certeza. Apresentá-la em percentual. O `valor_em_risco` é uma perda esperada e tende a ser superestimado; não descrevê-lo como valor que será perdido.
+- Só afirme uma tendência entre grupos ordenados (por exemplo, "quanto menor o prazo, maior o atraso") se ela valer para todos os grupos, na ordem. Caso contrário, descreva os grupos que se destacam, sem generalizar.
+
+- Não afirme que um fator causa atraso. Os recortes mostram associação: use expressões como "está associado a" ou "concentra". Prazo de pagamento e porte do cliente andam juntos, então um efeito atribuído ao prazo pode ser do porte. Quando um grupo tiver poucos clientes (qtd_clientes), avise que a conclusão é frágil.
+
+- DSO e dias_alem_prazo medem a carteira em dias de venda, e não o tempo que os clientes levam para pagar. Não diga que os clientes pagam X dias depois do prazo com base neles. Para o atraso de pagamento dos clientes, use atraso_medio_simples ou atraso_medio_ponderado, que só consideram títulos pagos.
+
+- Ao falar de concentração ou parcela, informe o percentual sobre o total (por exemplo, da carteira vencida da kpis_gerais), em vez de usar palavras como "significativa".
+
+- Antes de rotular um cliente com muito valor vencido, verifique na fato_titulos se ele tem títulos pagos e quando foi o último pagamento. Se ele paga a maior parte dos títulos e paga até hoje, descreva o caso como títulos vencidos específicos, possivelmente em disputa, e recomende revisá-los um a um. Reserve "inadimplência crônica" para clientes que pararam de pagar. Se o cliente paga, mas a maioria dos títulos pagos foi paga com atraso, descreva-o como atrasador habitual, e não como caso de títulos em disputa.
+
+- A risco_titulos cobre só os títulos em aberto que ainda não completaram 30 dias após o vencimento. Os vencidos há mais de 30 dias não estão nela, porque já são atraso grave e estão na fato_titulos. Ao falar de "valor em risco da empresa", deixe claro que ele não inclui a carteira já vencida há mais de 30 dias.
+
+- probabilidade_atraso é uma estimativa para ordenar a cobrança, não uma certeza. Apresente-a em percentual. O valor_em_risco é o valor esperado em atraso grave (mais de 30 dias ou não pagamento), e não uma perda: o título ainda pode ser pago depois. Ele tende a ser superestimado. Nunca o descreva como valor que será perdido ou que a empresa deixará de receber.
 
 ## Perguntas de teste
 
