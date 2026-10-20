@@ -39,7 +39,7 @@ fatura vence. O time de cobrança é pequeno e não consegue ligar para todos os
 | Área | Pergunta | Decisão apoiada | Onde é respondida |
 |---|---|---|---|
 | Diretoria financeira | Quanto tempo levamos, em média, para transformar venda em caixa (DSO)? | Planejamento de capital de giro | `kpis_gerais` · Power BI, página 1 |
-| Diretoria financeira | O DSO está piorando? | Planejamento de capital de giro | *Previsto: série mensal do DSO* |
+| Diretoria financeira | O DSO está piorando? | Planejamento de capital de giro | Série mensal · `dso_mensal` · Power BI, página 4 |
 | Crédito e Cobrança | Quais faturas **ainda não vencidas** têm maior risco de atraso? | Priorizar a cobrança preventiva | Modelo de ML · `risco_titulos` · Power BI, página 3 |
 | Crédito e Cobrança | Quais clientes mudaram de comportamento recentemente? | Revisar limite e condição de pagamento | *Previsto: monitoramento do risco ao longo do tempo* |
 | Comercial | Algum ramo, região ou condição de pagamento concentra o atraso? | Política comercial e de prazos | Recortes da Gold · Power BI, página 2 |
@@ -83,6 +83,35 @@ reproduzível: rodar o pipeline em outro dia não muda os números.
 > médio concedido e são usados nos recortes e no painel. A definição de livro do *Average Days Delinquent*
 > é o DSO menos o *Best Possible DSO* (calculado só com a carteira a vencer), o que equivale à
 > **carteira vencida medida em dias de venda: 16,87 dias**. Os dois números não devem ser misturados.
+
+### O DSO está piorando?
+
+A tabela `dso_mensal` recalcula o DSO no último dia de cada mês, de set/2024 a ago/2026, e na data de corte.
+Cada ponto usa a carteira como ela estava naquele dia: títulos emitidos até a data e ainda não pagos nela,
+sem usar a coluna `status`, que descreve só a data de corte. A última linha reproduz a `kpis_gerais` (79,67 dias).
+
+![Evolução do DSO](docs/img/evolucao_dso.png)
+
+- **Os três primeiros meses (tracejado) não são comparáveis:** a janela de 90 dias de faturamento ainda não estava completa.
+- **O prazo médio concedido ficou estável**, entre 61,3 e 62,8 dias. A piora não veio da política comercial.
+- **A série tem sazonalidade** (queda em janeiro, alta em março e dezembro), então a comparação certa é com o mesmo mês do ano anterior.
+- **A carteira vencida há mais de 90 dias cresce todo mês**, de R$ 0,28 mi (jan/2025) para R$ 11,16 mi (22/09/2026),
+  porque os dados não têm baixa de títulos como perda. A linha "DSO sem 90+" separa esse efeito; ela não substitui o DSO,
+  já que esses títulos continuam sendo valores não recebidos.
+
+| Mês | DSO 2025 | DSO 2026 | DSO sem 90+ 2025 | DSO sem 90+ 2026 |
+|---|---:|---:|---:|---:|
+| Janeiro | 63,97 | 68,42 | 63,65 | 63,18 |
+| Março | 70,66 | 79,42 | 69,12 | 71,33 |
+| Agosto | 69,15 | 78,74 | 65,24 | 69,31 |
+| Setembro* | 71,07 | 79,67 | 66,95 | 70,29 |
+
+\* Em 2026, setembro é a data de corte (22/09).
+
+**Conclusão:** sim, o DSO está piorando, mas quase toda a piora vem dos títulos com mais de 90 dias de atraso,
+que se acumulam na carteira. Sem eles, a variação de um ano para o outro fica entre −0,5 e +4,1 dias.
+O problema não é o cliente médio pagar pior, e sim recuperar os títulos que passam do primeiro mês de atraso,
+o que conversa com o aging em "U" da carteira.
 
 ### Onde está o atraso: recortes por ramo, UF e prazo
 
@@ -155,6 +184,7 @@ Tudo fica no catálogo `workspace`, nos schemas `s4lake_bronze`, `s4lake_silver`
 | `aging_carteira` | uma faixa de aging da carteira em aberto | 5 |
 | `features_historico_cliente` | um título, com o histórico do cliente conhecido na emissão dele | 28.725 |
 | `risco_titulos` | um título em aberto sem desfecho conhecido, com a probabilidade de atraso e o valor em risco | 2.868 |
+| `dso_mensal` | um fim de mês (e a data de corte), com a carteira como estava naquele dia | 25 |
 
 O modelo campeão fica registrado no mesmo schema, como `workspace.s4lake_gold.modelo_risco_atraso`.
 
@@ -183,6 +213,7 @@ As credenciais de conexão não ficam salvas no arquivo.
 | Visão executiva | Diretoria financeira | Carteira em aberto e vencida, DSO com o prazo concedido e os dias além do prazo, % pago com atraso e aging em R$ |
 | Onde está o atraso | Área Comercial | Dias além do prazo por ramo, UF e prazo, com a média da empresa como referência e destaque para os grupos acima dela |
 | Cobrança preventiva | Crédito e Cobrança | Valor em risco, títulos com risco acima de 50%, clientes ordenados pelo valor em risco e, ao clicar num cliente, os títulos dele com a probabilidade prevista |
+| Evolução do DSO | Diretoria financeira | DSO mensal com e sem a carteira vencida há mais de 90 dias, e o prazo médio concedido como referência |
 
 **Visão executiva**
 
@@ -358,6 +389,7 @@ Na Gold, as tabelas também se amarram:
 - a `features_historico_cliente` tem uma linha por título (28.725) e os nulos da feature na base do modelo
   (3.573) são exatamente os títulos sem histórico do treino (3.248) e do teste (325);
 - o valor pontuado na `risco_titulos` (R$ 81.529.575,85) é igual à carteira a vencer mais a faixa 1–30 do aging.
+- a linha da data de corte da `dso_mensal` reproduz a carteira aberta, o faturamento de 90 dias, o DSO e o prazo médio da `kpis_gerais`.
 
 ## 9. Principais decisões de arquitetura
 
@@ -430,6 +462,7 @@ Notebooks de ML (pasta `ml/`):
 | `09_ml_base_treino` | Define o alvo, monta a base, separa treino e teste no tempo, compara baseline, regra simples e modelo com histórico no MLflow, valida com o gabarito e registra o modelo campeão |
 | `10_ml_features_historico` | Calcula o atraso médio *point-in-time* do histórico de cada cliente e grava a `features_historico_cliente` |
 | `11_ml_pontuacao` | Carrega o modelo campeão, pontua os títulos em aberto sem desfecho e grava a `risco_titulos` |
+| `12_gold_dso_mensal` | Recalcula o DSO, o prazo médio e a carteira vencida há mais de 90 dias no fim de cada mês, olhando a carteira como estava em cada data |
 
 ## 11. Como reproduzir
 
@@ -453,7 +486,7 @@ validar** o modelo e nunca é usada como variável de entrada (evita *data leaka
 
 1. Clone este repositório como **Git folder** no workspace do Databricks (Free Edition).
 2. Suba os CSVs de `data/raw` para o volume da Landing, no caminho indicado no início do notebook `01_bronze_ingestao`.
-3. Rode os notebooks do pipeline na ordem, de `01` a `08`.
+3. Rode os notebooks do pipeline na ordem, de `01` a `08`, e depois o `12`.
 4. Rode os notebooks de ML na ordem `10` → `09` → `11`: as features de histórico precisam existir antes do treino,
    e a pontuação usa o modelo registrado pelo treino.
 5. Para o painel, abra o `.pbix` da pasta `dashboards/` no Power BI Desktop. Para atualizar os dados, conecte-o
@@ -474,7 +507,7 @@ validar** o modelo e nunca é usada como variável de entrada (evita *data leaka
   - [x] Fato de títulos com atraso, situação e aging
   - [x] KPIs gerais com DSO e dias além do prazo
   - [x] Aging em R$ e recortes por ramo, UF e condição de pagamento
-  - [ ] Série mensal do DSO, para acompanhar a tendência
+  - [x] Série mensal do DSO, para acompanhar a tendência
 - [x] Painel e espaço Genie
   - [x] Power BI: visão executiva
   - [x] Power BI: onde está o atraso
