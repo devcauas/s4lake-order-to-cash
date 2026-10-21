@@ -1,0 +1,91 @@
+# Databricks Asset Bundle do S4Lake — Order-to-Cash
+# Descreve o job do pipeline como código: tarefas, ordem e ambiente.
+
+bundle:
+  name: s4lake_order_to_cash
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-4293fad7-f5b3.cloud.databricks.com
+
+resources:
+  jobs:
+    s4lake_pipeline:
+      name: s4lake_pipeline
+      max_concurrent_runs: 1
+
+      tasks:
+        # ---------- Bronze ----------
+        - task_key: bronze_ingestao
+          notebook_task:
+            notebook_path: ./pipelines/01_bronze_ingestao.ipynb
+
+        # ---------- Silver ----------
+        - task_key: silver_clientes
+          depends_on:
+            - task_key: bronze_ingestao
+          notebook_task:
+            notebook_path: ./pipelines/02_silver_clientes.ipynb
+
+        - task_key: silver_vendas
+          depends_on:
+            - task_key: bronze_ingestao
+          notebook_task:
+            notebook_path: ./pipelines/03_silver_vendas.ipynb
+
+        - task_key: silver_faturamento
+          depends_on:
+            - task_key: silver_vendas
+          notebook_task:
+            notebook_path: ./pipelines/04_silver_faturamento.ipynb
+
+        - task_key: silver_contas_receber
+          depends_on:
+            - task_key: silver_faturamento
+          notebook_task:
+            notebook_path: ./pipelines/05_silver_contas_receber.ipynb
+
+        # ---------- Gold ----------
+        - task_key: gold_fato_titulos
+          depends_on:
+            - task_key: silver_contas_receber
+          notebook_task:
+            notebook_path: ./pipelines/06_gold_fato_titulos.ipynb
+
+        - task_key: gold_kpis
+          depends_on:
+            - task_key: gold_fato_titulos
+          notebook_task:
+            notebook_path: ./pipelines/07_gold_kpis.ipynb
+
+        - task_key: gold_recortes
+          depends_on:
+            - task_key: silver_clientes
+            - task_key: gold_fato_titulos
+            - task_key: gold_kpis
+          notebook_task:
+            notebook_path: ./pipelines/08_gold_recortes.ipynb
+
+        - task_key: gold_dso_mensal
+          depends_on:
+            - task_key: gold_fato_titulos
+          notebook_task:
+            notebook_path: ./pipelines/12_gold_dso_mensal.ipynb
+
+        # ---------- ML (só pontuação; o treino no 09 fica fora do job) ----------
+        - task_key: ml_features_historico
+          depends_on:
+            - task_key: gold_fato_titulos
+          notebook_task:
+            notebook_path: ./ml/10_ml_features_historico.ipynb
+
+        - task_key: ml_pontuacao
+          depends_on:
+            - task_key: silver_clientes
+            - task_key: gold_fato_titulos
+            - task_key: ml_features_historico
+          notebook_task:
+            notebook_path: ./ml/11_ml_pontuacao.ipynb
