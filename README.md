@@ -3,8 +3,9 @@
 Arquitetura de referência **SAP + Databricks** para análise e previsão de recebíveis, inspirada no
 [SAP Business Data Cloud](https://www.sap.com/products/data-cloud/databricks.html).
 
-**Em resumo:** a partir de dados no modelo SAP (SD + FI-AR), o projeto monta um pipeline Bronze → Silver → Gold
-no Databricks, mede onde está o atraso de recebimento e prevê quais faturas em aberto vão atrasar.
+**Em resumo:** a partir de dados no modelo SAP (SD + FI-AR), carregados num **SAP HANA Cloud**, o projeto monta
+um pipeline Bronze → Silver → Gold no Databricks, mede onde está o atraso de recebimento e prevê quais faturas
+em aberto vão atrasar.
 
 - **DSO 18 dias acima do prazo concedido**, com o atraso concentrado em um ramo, uma UF e poucos clientes.
 - **O modelo encontra 63% dos atrasos graves** ligando para só 10% dos títulos, contra 10% ao acaso.
@@ -17,8 +18,8 @@ no Databricks, mede onde está o atraso de recebimento e prevê quais faturas em
 > **Transparência:** o SAP Databricks é um produto corporativo licenciado dentro do SAP Business Data Cloud (BDC).
 > A SAP oferece um [basic trial do BDC](https://www.sap.com/products/data-cloud/trial.html) de 30 dias, em tenant
 > compartilhado com dados pré-configurados e sem persistência entre períodos, o que não permite hospedar um
-> pipeline próprio. Por isso, este projeto reproduz o mesmo padrão de arquitetura com o **Databricks Free Edition**
-> (SAP HANA Cloud previsto), usando dados sintéticos que seguem o modelo de dados real do SAP (SD + FI-AR).
+> pipeline próprio. Por isso, este projeto reproduz o mesmo padrão de arquitetura com o **Databricks Free Edition** e o
+> **SAP HANA Cloud** (BTP Trial) como origem, usando dados sintéticos que seguem o modelo de dados real do SAP (SD + FI-AR).
 
 ---
 
@@ -136,7 +137,7 @@ Por isso, os recortes são comparados pelos **dias além do prazo**:
 
 ```mermaid
 flowchart LR
-    subgraph SAP["SAP S/4HANA (dados sintéticos)"]
+    subgraph SAP["SAP HANA Cloud · schema SAPHANADB (dados sintéticos)"]
         direction TB
         KNA["KNA1 · KNB1<br/>clientes"]
         VBA["VBAK · VBAP<br/>ordens de venda"]
@@ -146,7 +147,6 @@ flowchart LR
 
     subgraph DBX["Databricks Free Edition · Unity Catalog"]
         direction LR
-        LAND["Landing<br/>(Volume)"]
         BRZ["Bronze<br/>cópia fiel"]
         SLV["Silver<br/>limpo + quarentena"]
         GLD["Gold<br/>KPIs · features · risco"]
@@ -156,21 +156,21 @@ flowchart LR
 
     PBI["Power BI Desktop"]
 
-    SAP --> LAND --> BRZ --> SLV --> GLD
+    SAP -- "hdbcli · somente leitura" --> BRZ --> SLV --> GLD
     GLD -- "features" --> ML
     ML -- "risco_titulos" --> GLD
     GLD --> GEN
     GLD -- "SQL warehouse" --> PBI
 ```
 
-- **Landing**: volume do Unity Catalog onde os arquivos chegam sem transformação
-- **Bronze**: cópia fiel da origem (tudo como texto, datas `YYYYMMDD`, chaves com zeros à esquerda) com metadados de auditoria
+- **Origem SAP**: SAP HANA Cloud com as tabelas no schema `SAPHANADB` (padrão do S/4HANA), tipos do dicionário de dados do SAP e datas como texto `YYYYMMDD`
+- **Bronze**: cópia fiel da origem, lida direto do HANA por um usuário somente leitura (tudo como texto, chaves com zeros à esquerda), com metadados de auditoria (`_ingestao_em`, `_sistema_origem`, `_tabela_origem`)
 - **Silver**: tipagem, deduplicação, nomes de negócio, integridade referencial, **quarentena** de registros inválidos e **reconciliação** de contagens
-- **Gold**: fato de títulos, KPIs gerais, recortes por ramo, UF e prazo, aging em R$, features do modelo e risco previsto (detalhes abaixo)
+- **Gold**: fato de títulos, KPIs gerais, recortes por ramo, UF e prazo, aging em R$, série mensal do DSO, features do modelo e risco previsto (detalhes abaixo)
 - **ML**: classificação do risco de atraso por título com scikit-learn, experimentos no MLflow e modelo registrado no Unity Catalog; a pontuação volta para a Gold
 - **Consumo**: painel no Power BI Desktop lendo a Gold por um SQL warehouse, e espaço Genie para perguntas em português
 
-Tudo fica no catálogo `workspace`, nos schemas `s4lake_bronze`, `s4lake_silver` e `s4lake_gold`.
+No Databricks, tudo fica no catálogo `workspace`, nos schemas `s4lake_bronze`, `s4lake_silver` e `s4lake_gold`.
 
 ### Tabelas da Gold
 
@@ -201,6 +201,20 @@ e são a principal fonte de contexto do Genie.
 
 O cliente é cadastrado (**KNA1/KNB1**), faz um pedido (**VBAK/VBAP**), recebe a fatura (**VBRK/VBRP**),
 e essa fatura vira um título em aberto (**BSID**) até ser paga (**BSAD**).
+
+### A origem SAP no HANA Cloud
+
+As oito tabelas ficam no schema `SAPHANADB`, o mesmo nome que o S/4HANA usa para as tabelas dele, com os
+tipos do dicionário de dados do SAP (DDIC):
+
+- **Chaves e textos** como `NVARCHAR` com o tamanho do campo no SAP, preservando os zeros à esquerda.
+- **Datas** como `NVARCHAR(8)` no formato `YYYYMMDD`, que é como o SAP grava o tipo de data do ABAP no banco.
+- **Valores em moeda** como `DECIMAL(13,2)` ou `DECIMAL(15,2)`, e quantidades como `DECIMAL(..,3)`.
+
+O acesso é separado em dois usuários técnicos: o `S4LAKE_CARGA`, dono do schema, faz o papel do próprio SAP
+gravando os dados; o `S4LAKE_LEITURA` tem apenas permissão de consulta e é o único usado pelo Databricks.
+Assim, nenhum notebook do pipeline consegue alterar a origem. Host e senhas ficam nos *secrets* do Databricks,
+e nunca aparecem nos notebooks.
 
 ## 5. Painel no Power BI e espaço Genie
 
@@ -350,9 +364,10 @@ Para a cobrança, isso significa que uma lista curta resolve a maior parte do pr
 
 ## 7. Stack
 
-Python (pandas, numpy, scikit-learn) · Databricks Free Edition · PySpark · Spark SQL · Delta Lake · Unity Catalog ·
-Databricks SQL warehouse · Genie · MLflow (experimentos e registro de modelos no Unity Catalog) · Power BI Desktop ·
-Git + GitHub (Databricks Git folders) · *previstos:* SAP HANA Cloud, GitHub Actions + Databricks Asset Bundles
+Python (pandas, numpy, scikit-learn) · SAP HANA Cloud (BTP Trial) · hdbcli · Databricks Free Edition · PySpark ·
+Spark SQL · Delta Lake · Unity Catalog · Databricks secrets · Databricks SQL warehouse · Genie ·
+MLflow (experimentos e registro de modelos no Unity Catalog) · Power BI Desktop · Git + GitHub (Databricks Git folders) ·
+*previstos:* GitHub Actions + Databricks Asset Bundles
 
 ## 8. Qualidade de dados e reconciliação
 
@@ -378,7 +393,19 @@ O gerador injeta problemas de qualidade **de propósito**, para que a camada Sil
 
 Checagem de consistência de negócio: **BSID + BSAD = VBRK** (toda fatura virou exatamente um título a receber).
 
-Na Gold, as tabelas também se amarram:
+### Troca de origem: dos arquivos para o SAP HANA
+
+A Bronze passou a ler do SAP HANA Cloud no lugar dos CSVs. Antes da troca, as duas versões foram comparadas linha a linha:
+
+- **As contagens são iguais** nas oito tabelas.
+- **As únicas diferenças reais são 25 nomes de cliente** (KNA1.NAME1), truncados na carga para os 35 caracteres do campo no SAP.
+- **Os valores em moeda diferiam só no formato** (`9363.0` no CSV, `9363` no HANA). Convertidos para `decimal(15,2)`,
+  como a Silver faz, as diferenças zeram.
+
+Depois da troca, o pipeline inteiro foi executado de novo, e todos os números da Silver e da Gold se mantiveram,
+da quarentena (449 e 259 itens) ao valor em risco (R$ 9.140.483,95).
+
+### Amarrações na Gold
 
 - a soma dos títulos por situação reproduz as contagens da Silver (pagos no prazo + pagos com atraso = 25.373;
   a vencer + vencidos = 3.352);
@@ -388,14 +415,22 @@ Na Gold, as tabelas também se amarram:
 - 790 dos 800 clientes têm títulos; os 10 restantes estão cadastrados, mas nunca foram faturados;
 - a `features_historico_cliente` tem uma linha por título (28.725) e os nulos da feature na base do modelo
   (3.573) são exatamente os títulos sem histórico do treino (3.248) e do teste (325);
-- o valor pontuado na `risco_titulos` (R$ 81.529.575,85) é igual à carteira a vencer mais a faixa 1–30 do aging.
+- o valor pontuado na `risco_titulos` (R$ 81.529.575,85) é igual à carteira a vencer mais a faixa 1–30 do aging;
 - a linha da data de corte da `dso_mensal` reproduz a carteira aberta, o faturamento de 90 dias, o DSO e o prazo médio da `kpis_gerais`.
 
 ## 9. Principais decisões de arquitetura
 
 | Decisão | Por quê |
 |---|---|
+| SAP HANA Cloud como origem, com leitura direta para a Bronze | Bancos de dados são lidos direto pela ingestão; a Bronze já é a cópia bruta, e um arquivo intermediário seria uma segunda cópia |
+| Tabelas no schema `SAPHANADB` com os tipos do DDIC | Reproduz o S/4HANA: datas como `NVARCHAR(8)`, chaves com zeros à esquerda, valores em `DECIMAL` |
+| Usuário de carga e usuário somente leitura separados | O pipeline de dados não consegue alterar a origem, como num ERP real |
+| Credenciais nos secrets do Databricks | Nenhuma senha ou host aparece nos notebooks versionados no Git |
+| Carga no HANA por notebook reproduzível | A instância gratuita é apagada após 30 dias inativa; a origem pode ser recriada a qualquer momento |
+| Valores longos truncados na carga, com registro | Reproduz o limite do campo no SAP e documenta os 25 casos, sem alterar o gerador nem os KPIs |
 | Bronze com tudo como texto e sem correções | Preserva zeros à esquerda e a fidelidade à origem; se uma regra estiver errada, dá para reprocessar sem voltar ao SAP |
+| Bronze mantida toda como texto após a troca de origem | Mudar só a origem permite provar que os dados não mudaram; tipos da origem ficam para depois |
+| Vazio da origem convertido em nulo na extração | Mantém o mesmo contrato da Bronze anterior, do qual a Silver depende |
 | Renomear as colunas na Silver | Da Silver em diante, o consumidor é o analista, não o especialista SAP; o nome original fica preservado na Bronze |
 | Flag quando o registro é usável; quarentena quando não é | Cliente sem CNPJ continua devendo; item com quantidade zero não faz sentido |
 | `decimal(15,2)` para valores monetários | Evita os erros de arredondamento do `double`; mesmo padrão do SAP |
@@ -411,6 +446,9 @@ Na Gold, as tabelas também se amarram:
 | Uma função de KPIs para o total e para os recortes | Evita código copiado; sem agrupamento, reproduz a `kpis_gerais` e serve de teste |
 | Divisões com `try_divide` | No modo ANSI, uma divisão por zero quebraria o pipeline |
 | Dias além do prazo e quantidade de clientes em cada recorte | O DSO bruto não é comparável entre grupos; grupos pequenos pedem cautela |
+| Série mensal calculada pelas datas de emissão e pagamento, sem usar o `status` | O `status` descreve só a data de corte; um título pago em agosto estava em aberto em março |
+| Meses com janela de faturamento incompleta mantidos e marcados | Esconder os pontos apagaria o efeito; marcá-los avisa que não são comparáveis |
+| DSO sem a carteira 90+ como coluna extra, sem simular baixa como perda | Separa a cauda de títulos antigos sem inventar uma política de baixa que os dados não têm |
 | Descrição do ramo na dimensão de clientes (Silver) | É atributo do cliente; Gold, Power BI e Genie herdam o nome legível |
 | Regras de negócio na Gold, e não no Power BI | Cada regra existe em um só lugar; o painel apenas exibe |
 | Power BI em modo Import | Economiza a cota da Free Edition e permite versionar o `.pbix` com os dados |
@@ -436,17 +474,24 @@ Na Gold, as tabelas também se amarram:
 
 ```
 data_generator/   Gerador de dados sintéticos no modelo SAP
+sap_hana/         Carga dos dados sintéticos no SAP HANA Cloud
 pipelines/        Notebooks Bronze → Silver → Gold
 ml/               Modelo de previsão de atraso
 dashboards/       Painel do Power BI (.pbix) e configuração do espaço Genie
 docs/             Dicionário de dados e decisões de arquitetura
 ```
 
+Notebook da origem SAP (pasta `sap_hana/`):
+
+| Notebook | O que faz |
+|---|---|
+| `00_carga_sap_hana` | Cria as 8 tabelas no schema `SAPHANADB` com os tipos do DDIC e carrega os CSVs do gerador com o usuário de carga, truncando e registrando valores acima do tamanho do campo |
+
 Notebooks do pipeline:
 
 | Notebook | O que faz |
 |---|---|
-| `01_bronze_ingestao` | Lê os CSVs do volume e grava as 8 tabelas Bronze com metadados de auditoria |
+| `01_bronze_ingestao` | Lê as 8 tabelas do SAP HANA com o usuário somente leitura e grava a Bronze com metadados de auditoria |
 | `02_silver_clientes` | Deduplica a KNA1, junta com a KNB1, sinaliza CNPJ ausente e acrescenta a descrição do ramo |
 | `03_silver_vendas` | Separa ordens e itens, tipa valores e envia itens inválidos para a quarentena |
 | `04_silver_faturamento` | Faturas e itens com duas checagens de integridade referencial |
@@ -454,6 +499,7 @@ Notebooks do pipeline:
 | `06_gold_fato_titulos` | Calcula dias de atraso contra a data de corte, situação e faixa de aging de cada título |
 | `07_gold_kpis_gerais` | Resume a carteira em uma linha de KPIs: vencidos, atrasos médios, DSO, prazo médio e dias além do prazo |
 | `08_gold_recortes` | Junta os títulos aos clientes e calcula os KPIs por ramo, UF e prazo, e o aging em R$ |
+| `12_gold_dso_mensal` | Recalcula o DSO, o prazo médio e a carteira vencida há mais de 90 dias no fim de cada mês, olhando a carteira como estava em cada data |
 
 Notebooks de ML (pasta `ml/`):
 
@@ -462,7 +508,6 @@ Notebooks de ML (pasta `ml/`):
 | `09_ml_base_treino` | Define o alvo, monta a base, separa treino e teste no tempo, compara baseline, regra simples e modelo com histórico no MLflow, valida com o gabarito e registra o modelo campeão |
 | `10_ml_features_historico` | Calcula o atraso médio *point-in-time* do histórico de cada cliente e grava a `features_historico_cliente` |
 | `11_ml_pontuacao` | Carrega o modelo campeão, pontua os títulos em aberto sem desfecho e grava a `risco_titulos` |
-| `12_gold_dso_mensal` | Recalcula o DSO, o prazo médio e a carteira vencida há mais de 90 dias no fim de cada mês, olhando a carteira como estava em cada data |
 
 ## 11. Como reproduzir
 
@@ -482,20 +527,42 @@ Ao ler os CSVs, trate todas as colunas-chave como **texto**, senão os zeros à 
 A pasta `data/_gabarito/` contém o perfil real de pagamento de cada cliente. Ela serve **somente para
 validar** o modelo e nunca é usada como variável de entrada (evita *data leakage*).
 
-### 2. Rodar no Databricks
+### 2. Preparar o SAP HANA Cloud
 
-1. Clone este repositório como **Git folder** no workspace do Databricks (Free Edition).
-2. Suba os CSVs de `data/raw` para o volume da Landing, no caminho indicado no início do notebook `01_bronze_ingestao`.
-3. Rode os notebooks do pipeline na ordem, de `01` a `08`, e depois o `12`.
-4. Rode os notebooks de ML na ordem `10` → `09` → `11`: as features de histórico precisam existir antes do treino,
+1. Crie uma conta no **SAP BTP Trial** (região US10), assine o **SAP HANA Cloud** (plano `tools`) e atribua a
+   role collection **SAP HANA Cloud Administrator** ao seu usuário.
+2. No SAP HANA Cloud Central, crie uma instância **SAP HANA Database** com **Allow all IP addresses**.
+3. No SQL Console, como `DBADMIN`, crie os usuários `S4LAKE_CARGA` e `S4LAKE_LEITURA` e o schema
+   `SAPHANADB` com dono `S4LAKE_CARGA`. Conectado como `S4LAKE_CARGA`, conceda `SELECT` no schema ao `S4LAKE_LEITURA`.
+
+A instância gratuita para toda noite e precisa ser iniciada antes de cada uso; se ficar 30 dias inativa, ela
+é apagada, e basta recriá-la e rodar a carga de novo.
+
+### 3. Rodar no Databricks
+
+1. Clone este repositório como **Git folder** no workspace do Databricks (Free Edition). A conta precisa estar
+   verificada pelo LinkedIn, para liberar o acesso de saída à internet.
+2. Grave no scope de secrets `s4lake` as chaves `hana_host`, `hana_senha_carga` e `hana_senha_leitura`.
+3. Suba os CSVs de `data/raw` para o volume `/Volumes/workspace/s4lake_bronze/landing` e rode o
+   `00_carga_sap_hana`.
+4. Com a instância do HANA ligada, rode os notebooks do pipeline na ordem, de `01` a `08`, e depois o `12`.
+5. Rode os notebooks de ML na ordem `10` → `09` → `11`: as features de histórico precisam existir antes do treino,
    e a pontuação usa o modelo registrado pelo treino.
-5. Para o painel, abra o `.pbix` da pasta `dashboards/` no Power BI Desktop. Para atualizar os dados, conecte-o
+6. Para o painel, abra o `.pbix` da pasta `dashboards/` no Power BI Desktop. Para atualizar os dados, conecte-o
    ao seu SQL warehouse (com um token de acesso pessoal).
 
 ### Simplificações conscientes
 
 - A condição de pagamento (prazo em dias) é extraída do próprio código (`D030` → 30); num SAP real, viria da tabela **T052**.
 - A descrição do ramo de atividade é mapeada no notebook; num SAP real, viria da tabela de textos **T016T**.
+- As tabelas no HANA não têm chave primária: com ela, os clientes duplicados injetados pelo gerador seriam rejeitados,
+  e o tratamento na Silver não teria o que mostrar.
+- A instância aceita conexões de qualquer IP, protegida por usuário, senha e TLS, porque a computação serverless
+  do Databricks não tem IP fixo; numa empresa, a conexão seria por rede privada.
+- No SAP Business Data Cloud, os dados chegam ao Databricks por Delta Sharing, sem cópia; aqui, a leitura é por
+  conexão direta ao banco.
+- 25 nomes de cliente do gerador passam dos 35 caracteres do campo `NAME1` e são truncados na carga; a correção na
+  origem fica para uma versão futura do gerador.
 
 ## 12. Roadmap
 
@@ -512,6 +579,7 @@ validar** o modelo e nunca é usada como variável de entrada (evita *data leaka
   - [x] Power BI: visão executiva
   - [x] Power BI: onde está o atraso
   - [x] Power BI: cobrança preventiva, com o risco previsto
+  - [x] Power BI: evolução do DSO
   - [x] Espaço Genie no Databricks, com a tabela de risco
 - [x] Modelo de risco de atraso (MLflow)
   - [x] Alvo, base de treino e separação temporal
@@ -519,11 +587,11 @@ validar** o modelo e nunca é usada como variável de entrada (evita *data leaka
   - [x] Features de histórico do cliente (*point-in-time*)
   - [x] Comparação com uma regra simples e validação com o gabarito
   - [x] Registro do modelo no Unity Catalog e pontuação dos títulos em aberto na Gold
-- [ ] Melhorias do modelo: corrigir a superestimação nas pontas e monitorar mudanças de comportamento dos clientes
-- [ ] Exploração do SAP Databricks no basic trial do SAP Business Data Cloud
-- [ ] Carga no SAP HANA Cloud
+- [x] SAP HANA Cloud como origem dos dados, com a troca validada linha a linha
+- [ ] Melhorias do modelo: corrigir a superestimação nas pontas
 - [ ] CI/CD com GitHub Actions + Databricks Asset Bundles
-- [ ] Artigo (SpecificData e LinkedIn)
+- [ ] Exploração do SAP Databricks no basic trial do SAP Business Data Cloud
+- [x] Artigo (SpecificData e LinkedIn)
 
 ---
 
