@@ -1,0 +1,47 @@
+# CI/CD do S4Lake: valida o bundle em todo PR e faz o deploy em produção
+# a cada push na main.
+
+name: Bundle CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ---------- CI: o código está saudável? ----------
+  validate:
+    name: Validar bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o código do repositório
+        uses: actions/checkout@v4
+
+      - name: Instalar o Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Validar o bundle de produção
+        run: databricks bundle validate -t prod
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+  # ---------- CD: levar o código para produção ----------
+  deploy:
+    name: Deploy em produção
+    needs: validate
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency: deploy-prod
+    steps:
+      - name: Baixar o código do repositório
+        uses: actions/checkout@v4
+
+      - name: Instalar o Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Deploy do bundle em produção
+        run: databricks bundle deploy -t prod
+        env:
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}

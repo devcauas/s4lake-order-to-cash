@@ -4,12 +4,21 @@
 bundle:
   name: s4lake_order_to_cash
 
+# Configuração comum a todos os ambientes
+workspace:
+  host: https://dbc-4293fad7-f5b3.cloud.databricks.com
+
 targets:
+  # Ambiente de desenvolvimento: deploy feito do seu PC, para testar
   dev:
     mode: development
     default: true
+
+  # Ambiente de produção: deploy feito só pelo GitHub Actions
+  prod:
+    mode: production
     workspace:
-      host: https://dbc-4293fad7-f5b3.cloud.databricks.com
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
 
 resources:
   jobs:
