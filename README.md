@@ -11,6 +11,8 @@ em aberto vão atrasar.
 - **O modelo encontra 63% dos atrasos graves** ligando para só 10% dos títulos, contra 10% ao acaso.
 - **R$ 9,14 mi em risco** na carteira em aberto, com **5 clientes concentrando 39%** desse valor.
 - **Nenhuma linha some:** toda tabela da Silver reconcilia com a origem (válidos + quarentena = origem).
+- **Pipeline como código:** o job é definido num Databricks Asset Bundle e implantado em produção pelo GitHub Actions;
+  a carga de produção reproduz a de desenvolvimento linha a linha.
 
 ![Página de cobrança preventiva do painel no Power BI](docs/img/cobranca_preventiva.png)
 *Obs.: Em clientes críticos, a probabilidade chega a valores acima de 99,9%, exibidos como 100,0% no painel, efeito da mesma causa.*
@@ -367,7 +369,7 @@ Para a cobrança, isso significa que uma lista curta resolve a maior parte do pr
 Python (pandas, numpy, scikit-learn) · SAP HANA Cloud (BTP Trial) · hdbcli · Databricks Free Edition · PySpark ·
 Spark SQL · Delta Lake · Unity Catalog · Databricks secrets · Databricks SQL warehouse · Genie ·
 MLflow (experimentos e registro de modelos no Unity Catalog) · Power BI Desktop · Git + GitHub (Databricks Git folders) ·
-*previstos:* GitHub Actions + Databricks Asset Bundles
+Databricks Jobs (serverless) · Databricks Asset Bundles · Databricks CLI · GitHub Actions
 
 ## 8. Qualidade de dados e reconciliação
 
@@ -469,16 +471,83 @@ da quarentena (449 e 259 itens) ao valor em risco (R$ 9.140.483,95).
 | Gabarito usado só na validação | Usá-lo como feature seria vazamento; como validação, mostra se o modelo aprendeu o padrão certo |
 | Modelo registrado no Unity Catalog com o apelido `campeao` | A pontuação não depende do número da versão; trocar de modelo é mover o apelido |
 | Pontuar só os títulos em aberto sem desfecho | Títulos já pagos não precisam de cobrança; os vencidos há mais de 30 dias já são atraso grave |
+| Job definido como código num Databricks Asset Bundle | O job deixa de existir só na interface: fica versionado, revisável e recriável com um comando |
+| Dependências do job pelas tabelas que cada notebook lê, e não pela numeração | Garante a ordem certa e libera o paralelismo; o `08` espera o `07` porque confere a soma dos recortes com a `kpis_gerais` |
+| Treino (`09`) fora do job, que só pontua | O treino é um experimento com decisão humana; no job, registraria a cada execução uma versão nova do mesmo modelo |
+| Ambientes `dev` e `prod` no mesmo bundle | O mesmo código testado no `dev` vai para o `prod`, sem cópia manual; o `prod` só recebe deploy pelo GitHub Actions |
+| Workflow valida em pull requests e faz o deploy só em push na `main` | Código ainda não aprovado nunca chega à produção |
+| Deploy separado da execução | Atualizar o código em produção e rodar o pipeline são decisões diferentes |
+| Job de produção sob demanda, sem agendamento | Com dados sintéticos e data de corte fixa, uma execução diária recalcularia os mesmos números e falharia sempre que o HANA do trial estivesse parado |
+| Token em GitHub Secrets, diferente do token do CLI local | Nada sensível no repositório; se um token vazar, revoga-se só ele |
+| Versões fixas do runner e da action de checkout | O ambiente do workflow só muda quando o projeto decide, e não quando o GitHub atualiza o `latest` |
 
-## 10. Estrutura do repositório
+## 10. Orquestração e CI/CD
+
+O pipeline roda como um **job do Databricks** definido em código, no arquivo [`databricks.yml`](databricks.yml)
+(um *Databricks Asset Bundle*), e chega à produção pelo **GitHub Actions**, sem nenhum passo manual no workspace.
+
+### O job
+
+São 11 tarefas em computação serverless. As dependências vêm das tabelas que cada notebook lê: uma tarefa só
+começa quando todas as tabelas de que precisa foram gravadas na mesma execução, e tarefas independentes rodam em paralelo.
+
+```mermaid
+flowchart LR
+    B01["01 bronze"] --> S02["02 silver clientes"]
+    B01 --> S03["03 silver vendas"] --> S04["04 silver faturamento"] --> S05["05 silver contas a receber"] --> G06["06 fato títulos"]
+    G06 --> G07["07 KPIs gerais"] --> G08["08 recortes"]
+    G06 --> G08
+    S02 --> G08
+    G06 --> G12["12 DSO mensal"]
+    G06 --> M10["10 features histórico"] --> M11["11 pontuação"]
+    G06 --> M11
+    S02 --> M11
+```
+
+O treino (`09`) não faz parte do job. A pontuação carrega o modelo pelo apelido `@campeao` no Unity Catalog:
+promover um modelo novo é mover o apelido, sem deploy, e voltar atrás é devolvê-lo à versão anterior.
+
+### Ambientes
+
+| | `dev` | `prod` |
+|---|---|---|
+| Deploy | Pelo CLI, no computador do desenvolvedor | Só pelo GitHub Actions |
+| Nome do job | `[dev usuário] s4lake_pipeline` | `s4lake_pipeline` |
+| Pasta no workspace | `.bundle/s4lake_order_to_cash/dev` | `.bundle/s4lake_order_to_cash/prod` |
+| Uso | Testar mudanças antes do push | Execução oficial do pipeline |
+
+### Fluxo de CI/CD
+
+O workflow [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) tem dois jobs:
+
+1. **Validar bundle** (em pull requests e pushes na `main`): instala o Databricks CLI e roda `databricks bundle validate -t prod`.
+2. **Deploy em produção** (só em push na `main` ou acionamento manual, e só se a validação passar): roda
+   `databricks bundle deploy -t prod`, que envia os notebooks e cria ou atualiza o job.
+
+O token de acesso fica em GitHub Secrets e aparece mascarado nos logs. O deploy não executa o pipeline: a execução
+é feita sob demanda, pelo botão *Run now* do job ou por `databricks bundle run -t prod s4lake_pipeline`.
+
+### Validação
+
+A primeira carga feita pelo job de produção foi comparada com a carga anterior, feita pelo job de desenvolvimento,
+usando o *time travel* do Delta Lake: as duas versões de cada tabela foram lidas com `versionAsOf` e comparadas com
+`exceptAll` nos dois sentidos, contando linhas repetidas. Na `kpis_gerais`, na `fato_titulos` e na `dso_mensal`,
+a diferença foi de **zero linhas**.
+
+O histórico de cada tabela (`DESCRIBE HISTORY`) registra o job e a execução que gravaram cada versão. Qualquer
+número da Gold pode ser rastreado até a execução que o produziu.
+
+## 11. Estrutura do repositório
 
 ```
-data_generator/   Gerador de dados sintéticos no modelo SAP
-sap_hana/         Carga dos dados sintéticos no SAP HANA Cloud
-pipelines/        Notebooks Bronze → Silver → Gold
-ml/               Modelo de previsão de atraso
-dashboards/       Painel do Power BI (.pbix) e configuração do espaço Genie
-docs/             Dicionário de dados e decisões de arquitetura
+data_generator/      Gerador de dados sintéticos no modelo SAP
+sap_hana/            Carga dos dados sintéticos no SAP HANA Cloud
+pipelines/           Notebooks Bronze → Silver → Gold
+ml/                  Modelo de previsão de atraso
+dashboards/          Painel do Power BI (.pbix) e configuração do espaço Genie
+docs/                Dicionário de dados e decisões de arquitetura
+databricks.yml       Databricks Asset Bundle: job do pipeline e ambientes dev e prod
+.github/workflows/   Workflow do GitHub Actions: validação e deploy do bundle
 ```
 
 Notebook da origem SAP (pasta `sap_hana/`):
@@ -497,7 +566,7 @@ Notebooks do pipeline:
 | `04_silver_faturamento` | Faturas e itens com duas checagens de integridade referencial |
 | `05_silver_contas_receber` | Unifica BSID e BSAD em títulos a receber, calcula o vencimento e valida contra as faturas |
 | `06_gold_fato_titulos` | Calcula dias de atraso contra a data de corte, situação e faixa de aging de cada título |
-| `07_gold_kpis_gerais` | Resume a carteira em uma linha de KPIs: vencidos, atrasos médios, DSO, prazo médio e dias além do prazo |
+| `07_gold_kpis` | Resume a carteira em uma linha de KPIs: vencidos, atrasos médios, DSO, prazo médio e dias além do prazo |
 | `08_gold_recortes` | Junta os títulos aos clientes e calcula os KPIs por ramo, UF e prazo, e o aging em R$ |
 | `12_gold_dso_mensal` | Recalcula o DSO, o prazo médio e a carteira vencida há mais de 90 dias no fim de cada mês, olhando a carteira como estava em cada data |
 
@@ -509,7 +578,7 @@ Notebooks de ML (pasta `ml/`):
 | `10_ml_features_historico` | Calcula o atraso médio *point-in-time* do histórico de cada cliente e grava a `features_historico_cliente` |
 | `11_ml_pontuacao` | Carrega o modelo campeão, pontua os títulos em aberto sem desfecho e grava a `risco_titulos` |
 
-## 11. Como reproduzir
+## 12. Como reproduzir
 
 ### 1. Gerar os dados
 
@@ -547,9 +616,27 @@ A instância gratuita para toda noite e precisa ser iniciada antes de cada uso; 
    `00_carga_sap_hana`.
 4. Com a instância do HANA ligada, rode os notebooks do pipeline na ordem, de `01` a `08`, e depois o `12`.
 5. Rode os notebooks de ML na ordem `10` → `09` → `11`: as features de histórico precisam existir antes do treino,
-   e a pontuação usa o modelo registrado pelo treino.
+   e a pontuação usa o modelo registrado pelo treino. No `09`, troque o `ID_MODELO_H` pelo ID do modelo do seu run.
 6. Para o painel, abra o `.pbix` da pasta `dashboards/` no Power BI Desktop. Para atualizar os dados, conecte-o
    ao seu SQL warehouse (com um token de acesso pessoal).
+
+### 4. Rodar como job (Asset Bundle)
+
+Depois da primeira execução manual, que registra o modelo campeão, o pipeline pode rodar como job:
+
+1. Instale o [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install), gere um token de acesso
+   pessoal e configure com `databricks configure --host <url-do-workspace>`.
+2. No `databricks.yml`, troque o `host` pela URL do seu workspace.
+3. Na raiz do repositório:
+
+```bash
+databricks bundle validate
+databricks bundle deploy
+databricks bundle run s4lake_pipeline
+```
+
+Para o deploy automático em produção, cadastre um segundo token como secret `DATABRICKS_TOKEN` do repositório
+no GitHub. A partir daí, cada push na `main` valida e implanta o bundle no ambiente `prod`.
 
 ### Simplificações conscientes
 
@@ -563,8 +650,14 @@ A instância gratuita para toda noite e precisa ser iniciada antes de cada uso; 
   conexão direta ao banco.
 - 25 nomes de cliente do gerador passam dos 35 caracteres do campo `NAME1` e são truncados na carga; a correção na
   origem fica para uma versão futura do gerador.
+- Os jobs de `dev` e `prod` gravam nas mesmas tabelas, porque os notebooks têm o catálogo e os schemas fixos no código;
+  numa empresa, cada ambiente teria o próprio catálogo, recebido do bundle como parâmetro.
+- A data de corte está fixa em cada notebook; num ambiente com dados chegando todo dia, ela seria um parâmetro do job.
+- O deploy usa um token pessoal; numa empresa, seria feito por um *service principal*, uma identidade que não
+  pertence a nenhuma pessoa.
+- A action `databricks/setup-cli` é usada na versão `@main`, sem fixar versão.
 
-## 12. Roadmap
+## 13. Roadmap
 
 - [x] Definição do problema de negócio
 - [x] Gerador de dados SAP (SD + FI-AR)
@@ -589,7 +682,11 @@ A instância gratuita para toda noite e precisa ser iniciada antes de cada uso; 
   - [x] Registro do modelo no Unity Catalog e pontuação dos títulos em aberto na Gold
 - [x] SAP HANA Cloud como origem dos dados, com a troca validada linha a linha
 - [ ] Melhorias do modelo: corrigir a superestimação nas pontas
-- [ ] CI/CD com GitHub Actions + Databricks Asset Bundles
+- [x] CI/CD com GitHub Actions + Databricks Asset Bundles
+  - [x] Job do pipeline definido como código, com dependências e paralelismo
+  - [x] Ambientes `dev` e `prod`
+  - [x] Validação e deploy automáticos pelo GitHub Actions
+  - [x] Carga de produção comparada com a de desenvolvimento por *time travel*
 - [ ] Exploração do SAP Databricks no basic trial do SAP Business Data Cloud
 - [x] Artigo (SpecificData e LinkedIn)
 
