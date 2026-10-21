@@ -681,13 +681,11 @@ no GitHub. A partir daí, cada push na `main` valida e implanta o bundle no ambi
   - [x] Comparação com uma regra simples e validação com o gabarito
   - [x] Registro do modelo no Unity Catalog e pontuação dos títulos em aberto na Gold
 - [x] SAP HANA Cloud como origem dos dados, com a troca validada linha a linha
-- [ ] Melhorias do modelo: corrigir a superestimação nas pontas
 - [x] CI/CD com GitHub Actions + Databricks Asset Bundles
   - [x] Job do pipeline definido como código, com dependências e paralelismo
   - [x] Ambientes `dev` e `prod`
   - [x] Validação e deploy automáticos pelo GitHub Actions
   - [x] Carga de produção comparada com a de desenvolvimento por *time travel*
-- [ ] Exploração do SAP Databricks no basic trial do SAP Business Data Cloud
 - [x] Artigo (SpecificData e LinkedIn)
 
 ---
